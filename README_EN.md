@@ -6,7 +6,7 @@ A Chrome browser extension for web page annotation — highlight text, take Mark
 
 <img src="src/assets/icons/icon128.png" width="64" height="64" alt="Web Notes icon">
 
-> **This project is entirely built with AI assistance.** Feel free to modify the code. Issues are welcome (but I'm lazy and may not fix them 😅) — it's way more fun to use AI tools and build whatever features you want yourself!
+> **This project is entirely built with AI assistance.** Feel free to modify the code. [Issues](https://github.com/lhh-pi/web-notes/issues) are welcome (but I'm lazy and may not fix them 😅) — it's way more fun to use AI tools and build whatever features you want yourself!
 
 ## Table of Contents
 
@@ -154,7 +154,7 @@ note/
 ### 1. Clone the Repository
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/lhh-pi/web-notes
 cd note
 ```
 

@@ -9,7 +9,7 @@
 
 <img src="src/assets/icons/icon128.png" width="64" height="64" alt="Web Notes icon">
 
-> **本项目全部由 AI 辅助构建。** 代码可自由修改，有问题欢迎提 [Issue](<your-repo-url>/issues)（但我比较懒，不一定修 😅），更推荐用 AI 工具自己动手，想要什么功能自己加~
+> **本项目全部由 AI 辅助构建。** 代码可自由修改，有问题欢迎提 [Issue](https://github.com/lhh-pi/web-notes/issues)（但我比较懒，不一定修 😅），更推荐用 AI 工具自己动手，想要什么功能自己加~
 
 ## 目录
 
@@ -158,7 +158,7 @@ note/
 ### 1. 克隆仓库
 
 ```bash
-git clone <your-repo-url>
+git clone https://github.com/lhh-pi/web-notes
 cd note
 ```
 
