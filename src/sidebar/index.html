@@ -1,0 +1,78 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Web Notes</title>
+  <link rel="stylesheet" href="../styles/sidebar.css" />
+</head>
+<body class="wn-sidebar">
+  <header class="wn-header">
+    <h1 class="wn-title">Web Notes</h1>
+    <div class="wn-header-actions">
+      <button id="theme-toggle" class="wn-btn wn-btn--icon" title="Toggle theme">&#9788;</button>
+    </div>
+  </header>
+
+  <div class="wn-tabs">
+    <button class="wn-tab wn-tab--active" data-tab="page">This Page</button>
+    <button class="wn-tab" data-tab="all">All Notes</button>
+    <button class="wn-tab" data-tab="search">Search</button>
+  </div>
+
+  <section id="panel-page" class="wn-panel wn-panel--active">
+    <div id="page-info" class="wn-page-info">
+      <p class="wn-page-url">Loading...</p>
+    </div>
+    <div id="notes-list" class="wn-notes-list">
+      <!-- Dynamically populated -->
+    </div>
+    <div id="no-notes" class="wn-empty" style="display:none;">
+      <p>No highlights on this page yet.</p>
+      <p class="wn-hint">Select text and right-click to highlight.</p>
+    </div>
+  </section>
+
+  <section id="panel-all" class="wn-panel">
+    <div class="wn-search-bar">
+      <input
+        type="text"
+        id="page-filter-input"
+        class="wn-search-input"
+        placeholder="Filter pages by title or URL..."
+        autocomplete="off"
+      />
+    </div>
+    <div id="page-list" class="wn-page-list">
+      <!-- Dynamically populated -->
+    </div>
+    <div id="no-pages" class="wn-empty" style="display:none;">
+      <p>No pages found.</p>
+    </div>
+  </section>
+
+  <section id="panel-search" class="wn-panel">
+    <div class="wn-search-bar">
+      <input
+        type="text"
+        id="search-input"
+        class="wn-search-input"
+        placeholder="Search all notes..."
+        autocomplete="off"
+      />
+    </div>
+    <div id="search-results" class="wn-search-results">
+      <!-- Dynamically populated -->
+    </div>
+    <div id="no-results" class="wn-empty" style="display:none;">
+      <p>No results found.</p>
+    </div>
+  </section>
+
+  <footer class="wn-footer">
+    <button id="export-btn" class="wn-btn wn-btn--primary" hidden>Export Notes</button>
+  </footer>
+
+  <script type="module" src="./index.ts"></script>
+</body>
+</html>
