@@ -70,7 +70,39 @@
   </section>
 
   <footer class="wn-footer">
-    <button id="export-btn" class="wn-btn wn-btn--primary" hidden>Export Notes</button>
+    <div class="wn-sync-section">
+      <!-- Sync mode selector -->
+      <label class="wn-sync-label">
+        Sync:
+        <select id="sync-mode-select" class="wn-sync-select">
+          <option value="off">Off</option>
+          <option value="auto">Auto</option>
+          <option value="manual">Manual</option>
+        </select>
+      </label>
+
+      <!-- Sync file button -->
+      <button id="sync-file-btn" class="wn-btn wn-btn--small" title="Choose sync file location">
+        Choose file...
+      </button>
+
+      <!-- Sync now button (visible in manual mode) -->
+      <button id="sync-now-btn" class="wn-btn wn-btn--small" title="Sync now" style="display:none;">
+        ↻ Sync now
+      </button>
+
+      <!-- Sync status -->
+      <span id="sync-status" class="wn-sync-status"></span>
+    </div>
+
+    <div class="wn-io-section">
+      <button id="export-json-btn" class="wn-btn wn-btn--small" title="Download all notes as JSON">
+        ↓ Export JSON
+      </button>
+      <button id="import-json-btn" class="wn-btn wn-btn--small" title="Import notes from JSON file">
+        ↑ Import JSON
+      </button>
+    </div>
   </footer>
 
   <script type="module" src="./index.ts"></script>

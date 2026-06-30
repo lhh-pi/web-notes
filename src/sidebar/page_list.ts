@@ -3,14 +3,22 @@
  * Domains are collapsed by default; click to expand and see pages.
  */
 
-import type { PageEntry } from '../shared/types';
-import * as api from '../shared/api';
+import type { PageSummary } from '../shared/db';
+import * as db from '../shared/db';
+import * as sync from '../shared/sync';
 
 /** Track which domains are currently expanded. */
 const expandedDomains = new Set<string>();
 
+/**
+ * Render the full page list grouped by domain.
+ *
+ * @param pages - Array of page summaries from IndexedDB.
+ * @param container - The DOM element to render into.
+ * @param onDelete - Callback invoked after a page or domain is deleted.
+ */
 export function renderPageList(
-  pages: PageEntry[],
+  pages: PageSummary[],
   container: HTMLElement,
   onDelete: () => void,
 ): void {
@@ -25,7 +33,7 @@ export function renderPageList(
   }
 
   // Group by domain
-  const grouped = new Map<string, PageEntry[]>();
+  const grouped = new Map<string, PageSummary[]>();
   for (const p of pages) {
     const entries = grouped.get(p.domain) || [];
     entries.push(p);
@@ -51,7 +59,7 @@ export function renderPageList(
     domainName.textContent = domain;
     header.appendChild(domainName);
 
-    const totalHl = entries.reduce((sum, e) => sum + e.highlight_count, 0);
+    const totalHl = entries.reduce((sum, e) => sum + e.highlightCount, 0);
     const count = document.createElement('span');
     count.className = 'wn-page-group-count';
     count.textContent = `${entries.length} page${entries.length > 1 ? 's' : ''} · ${totalHl} highlight${totalHl !== 1 ? 's' : ''}`;
@@ -65,7 +73,8 @@ export function renderPageList(
     delDomainBtn.addEventListener('click', (e) => {
       e.stopPropagation();
       if (!confirm(`Delete ALL notes from "${domain}" (${entries.length} page${entries.length > 1 ? 's' : ''})? This cannot be undone.`)) return;
-      Promise.all(entries.map((e) => api.deletePage(e.url)))
+      Promise.all(entries.map((e) => db.deletePage(e.url)))
+        .then(() => sync.maybeSync())
         .then(() => onDelete())
         .catch(() => alert('Failed to delete some pages.'));
     });
@@ -105,7 +114,8 @@ export function renderPageList(
   }
 }
 
-function createPageCard(page: PageEntry, onDelete: () => void): HTMLElement {
+/** Create a single page card element. */
+function createPageCard(page: PageSummary, onDelete: () => void): HTMLElement {
   const card = document.createElement('div');
   card.className = 'wn-page-card';
 
@@ -129,7 +139,7 @@ function createPageCard(page: PageEntry, onDelete: () => void): HTMLElement {
 
   const hlCount = document.createElement('span');
   hlCount.className = 'wn-page-hl-count';
-  hlCount.textContent = `${page.highlight_count} highlight${page.highlight_count !== 1 ? 's' : ''}`;
+  hlCount.textContent = `${page.highlightCount} highlight${page.highlightCount !== 1 ? 's' : ''}`;
   meta.appendChild(hlCount);
 
   const date = document.createElement('span');
@@ -163,7 +173,8 @@ function createPageCard(page: PageEntry, onDelete: () => void): HTMLElement {
   delBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     if (!confirm(`Delete all highlights for this page?\n\n${page.url}\n\nThis cannot be undone.`)) return;
-    api.deletePage(page.url)
+    db.deletePage(page.url)
+      .then(() => sync.maybeSync())
       .then(() => onDelete())
       .catch(() => alert('Failed to delete page.'));
   });
@@ -179,7 +190,14 @@ function createPageCard(page: PageEntry, onDelete: () => void): HTMLElement {
   return card;
 }
 
-export function filterPages(pages: PageEntry[], query: string): PageEntry[] {
+/**
+ * Filter pages by title, URL, or domain.
+ *
+ * @param pages - Full page list.
+ * @param query - Search query string.
+ * @returns Filtered page list.
+ */
+export function filterPages(pages: PageSummary[], query: string): PageSummary[] {
   if (!query.trim()) return pages;
   const q = query.toLowerCase().trim();
   return pages.filter(
@@ -190,6 +208,7 @@ export function filterPages(pages: PageEntry[], query: string): PageEntry[] {
   );
 }
 
+/** Format an ISO 8601 date string for display. */
 function formatDate(iso: string): string {
   try {
     const d = new Date(iso);

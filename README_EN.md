@@ -2,6 +2,8 @@
 
 A Chrome browser extension for web page annotation — highlight text, take Markdown notes, and sync across devices.
 
+[![License](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 [English](README_EN.md) | [中文](README.md)
 
 <img src="src/assets/icons/icon128.png" width="64" height="64" alt="Web Notes icon">
@@ -15,10 +17,7 @@ A Chrome browser extension for web page annotation — highlight text, take Mark
 - [Project Structure](#project-structure)
 - [Requirements](#requirements)
 - [Quick Start](#quick-start)
-- [Configuration](#configuration)
-- [Auto-Start Backend](#auto-start-backend)
-- [API Endpoints](#api-endpoints)
-- [Storage Format](#storage-format)
+- [Sync & Backup](#sync--backup)
 - [Usage Guide](#usage-guide)
 - [Highlight Recovery Strategy](#highlight-recovery-strategy)
 - [Development](#development)
@@ -29,14 +28,14 @@ A Chrome browser extension for web page annotation — highlight text, take Mark
 - **Text Highlighting**: Select text → right-click context menu, 4 colors (yellow / green / blue / red), three modes (highlight only, highlight + note, choose color)
 - **Markdown Notes**: Click any highlight to open an inline editing bubble with live Markdown preview (Edit / Preview tabs), interactive checkboxes, and 800ms debounced auto-save
 - **Smart Recovery**: Three-tier anchor strategy (XPath+offset → context fuzzy match → text-only fallback) ensures highlights survive minor page changes
-- **Broken Detection**: Highlight that can't be restored appears greyed out in the sidebar with a "Page changed" badge; note content remains fully readable
+- **Broken Detection**: Highlights that can't be restored appear greyed out in the sidebar with a "Page changed" badge; note content remains fully readable
 - **Sidebar Management**: Three-tab layout
   - **This Page**: all highlights on the current page, with "Go to highlight" scroll button
   - **All Notes**: all pages grouped by domain, expandable/collapsible, filter by title/URL, open in new tab, delete single pages or entire domains
   - **Search**: cross-site full-text search (300ms debounce + Enter for instant search), matches highlight text, note content, page title, and URL
-- **Dark Mode**: sidebar and bubble UI support dark/light theme, follows system `prefers-color-scheme` on first launch, manual toggle persisted to `chrome.storage.local`
-- **Multi-Device Sync**: note storage path is a relative path configured via `.env`, works with OneDrive or any cloud drive for automatic cross-device sync
-- **System Service**: Python backend supports systemd auto-start with daily per-device log rotation
+- **Dark Mode**: sidebar and bubble UI support dark/light theme, follows system `prefers-color-scheme` on first launch, manual toggle persisted
+- **Multi-Device Sync**: sync data to a single JSON file via File System Access API. Works with OneDrive, iCloud, or any cloud drive for automatic cross-device sync. Supports both automatic and manual sync modes
+- **Export/Import**: export all notes as a JSON file for backup; import from a JSON file with newer-wins merge strategy
 
 ## Architecture
 
@@ -50,38 +49,43 @@ A Chrome browser extension for web page annotation — highlight text, take Mark
 │  │ (injected)   │   │  Panel)   │   │ (msg routing)  │  │
 │  │              │   │           │   │                │  │
 │  │ • highlight  │   │ • notes   │   │ • context menu │  │
-│  │ • bubble UI  │   │ • search  │   │ • API proxy    │  │
+│  │ • bubble UI  │   │ • search  │   │ • msg routing  │  │
 │  │ • anchoring  │   │ • pages   │   │ • broadcasting │  │
 │  └──────┬───────┘   └─────┬─────┘   └───────┬────────┘  │
 │         │                 │                  │           │
-│         └────────┬────────┘                  │           │
-│                  │ chrome.runtime.sendMessage │           │
-│                  └────────────────────────────┘           │
-│                              │                            │
-└──────────────────────────────┼────────────────────────────┘
-                               │ HTTP (localhost:2463)
-                               ▼
-┌──────────────────────────────────────────────────────────┐
-│  Python Backend (FastAPI + Uvicorn)                      │
-│                                                          │
-│  ┌──────────┐  ┌──────────┐  ┌──────────┐  ┌─────────┐  │
-│  │ server.py│  │storage.py│  │search.py │  │export.py│  │
-│  │ (routes) │  │ (JSON CRUD)│ │(full-text)│ │(MD)     │  │
-│  └──────────┘  └──────────┘  └──────────┘  └─────────┘  │
-│                              │                            │
-│                    ┌─────────▼─────────┐                  │
-│                    │  $NOTE_STORAGE/   │                  │
-│                    │  (JSON files)     │                  │
-│                    └───────────────────┘                  │
-└──────────────────────────────────────────────────────────┘
+│         │    chrome.runtime.sendMessage      │           │
+│         └─────────────────┬──────────────────┘           │
+│                           │                              │
+│                    ┌──────▼──────┐                       │
+│                    │   db.ts     │                       │
+│                    │  IndexedDB  │ ← browser-native DB   │
+│                    └──────┬──────┘                       │
+│                           │                              │
+│                    ┌──────▼──────┐                       │
+│                    │  sync.ts    │ ← optional, file sync │
+│                    │ File System │                       │
+│                    │ Access API  │                       │
+│                    └──────┬──────┘                       │
+└───────────────────────────┼──────────────────────────────┘
+                            │ user-selected file
+                            ▼
+                 ~/OneDrive/web-notes.json
+                            │
+                 OneDrive client auto-syncs
+                            │
+                            ▼
+                     another computer
 ```
 
-### Communication
+### Data Flow
 
-- **Content Script ↔ Background Worker**: `chrome.runtime.sendMessage`
-- **Sidebar → Background Worker**: `chrome.runtime.sendMessage`
-- **Sidebar → Python Backend**: some read-only requests (search, page listing) are made directly via `shared/api.ts`
-- **Background Worker → Python Backend**: HTTP via `shared/api.ts` (the sole HTTP client module)
+- **Content Script → Background → IndexedDB**: highlight create/update/delete go through the background worker for consistency
+- **Sidebar → IndexedDB (direct)**: search, page listing, deletion are accessed directly from the sidebar
+- **sync.ts → JSON file**: in auto mode, every data change triggers a write; in manual mode, only on button click
+
+### Zero Dependencies at Runtime
+
+The extension is fully self-contained. No Python, no conda, no external services needed. Install and start annotating immediately. Sync is optional — just select a JSON file location (e.g., inside a OneDrive folder).
 
 ## Project Structure
 
@@ -95,15 +99,16 @@ note/
 │   │   └── anchor.ts             #     Text anchor computation & 3-tier recovery
 │   ├── sidebar/                  #   Side panel UI
 │   │   ├── index.html            #     HTML template
-│   │   ├── index.ts              #     Entry: tab switching, theme, loading
+│   │   ├── index.ts              #     Entry: tab switching, theme, sync controls
 │   │   ├── note_list.ts          #     Current page notes list (with broken badge)
 │   │   ├── page_list.ts          #     All pages list (domain grouping, delete)
 │   │   └── search_panel.ts       #     Full-text search panel
 │   ├── background/               #   Service Worker
-│   │   └── index.ts              #     Message routing + context menu + API proxy
+│   │   └── index.ts              #     Message routing + context menu
 │   ├── shared/                   #   Shared modules
 │   │   ├── types.ts              #     TypeScript type definitions
-│   │   └── api.ts                #     Python backend HTTP client
+│   │   ├── db.ts                 #     IndexedDB storage layer (CRUD + search + export)
+│   │   └── sync.ts               #     File System API sync layer (auto/manual/import/export)
 │   ├── assets/                   #   Static assets
 │   │   └── icons/                #     Extension icons (16/48/128 px)
 │   └── styles/                   #   Stylesheets
@@ -111,28 +116,14 @@ note/
 │       └── sidebar.css           #     Sidebar styles (CSS Variables, dark mode)
 ├── scripts/                      # Utility scripts
 │   └── generate_icons.py         #   Icon generator (Pillow)
-├── backend/                      # Python local backend
-│   ├── server.py                 #   FastAPI entry point + 10 routes
-│   ├── storage.py                #   JSON file CRUD + .index.json
-│   ├── search.py                 #   Full-text search with relevance scoring
-│   ├── export.py                 #   Markdown export
-│   ├── models.py                 #   Pydantic v2 data models (8 classes)
-│   ├── config.py                 #   Config management (reads config.json + .env)
-│   ├── run.sh                    #   Start / install / uninstall script
-│   └── requirements.txt          #   Python dependencies
-├── tests/                        # Tests
-│   └── backend/
-│       └── test_storage.py       #   Storage layer unit tests (pytest)
 ├── manifest.json                 # Chrome MV3 manifest
-├── config.json                   # Shared config: host + port
 ├── package.json                  # npm dependencies & scripts
 ├── tsconfig.json                 # TypeScript compiler config
 ├── vite.config.ts                # Vite + crxjs plugin config
-├── .env.example                  # Private config template
 ├── .gitignore
 ├── CLAUDE.md                     # AI dev guidelines
-├── README.md                     # This file (Chinese)
-└── README_EN.md                  # English version
+├── README.md                     # Chinese version
+└── README_EN.md                  # This file (English)
 ```
 
 ## Requirements
@@ -141,13 +132,11 @@ note/
 |-----------|---------|-------|
 | Node.js | ≥ 18 | For building the extension |
 | npm | ≥ 9 | Package management |
-| Python | 3.12 | Backend server |
-| Conda | miniconda3 / anaconda3 | Virtual environment (recommended) |
-| Chrome | ≥ 114 | Required for Side Panel API support |
+| Chrome / Edge | ≥ 114 | Required for Side Panel API; sync requires ≥ 86 (File System Access API) |
 
 > **Don't have Node.js?** Install via [nvm](https://github.com/nvm-sh/nvm) or download from [nodejs.org](https://nodejs.org/).
->
-> **Don't have Conda?** We recommend [miniconda3](https://docs.conda.io/en/latest/miniconda.html). You can also skip conda and use system Python 3.12 + venv + pip directly.
+
+**No Python, conda, or any backend service required.** The extension is fully self-contained.
 
 ## Quick Start
 
@@ -158,7 +147,7 @@ git clone https://github.com/lhh-pi/web-notes
 cd note
 ```
 
-### 2. Install Node.js Dependencies
+### 2. Install Dependencies
 
 ```bash
 npm install
@@ -175,58 +164,15 @@ Dependencies declared in `package.json` (`node_modules/` is gitignored — each 
 | `vite` | ^5.4.0 | Dev | Build tool (bundler) |
 | `vitest` | ^1.6.0 | Dev | Unit test framework |
 
-### 3. Create Python Virtual Environment & Install Dependencies
-
-```bash
-# Create conda environment
-conda create -n note python=3.12 -y
-conda activate note
-
-# Install Python dependencies
-pip install -r backend/requirements.txt
-```
-
-`backend/requirements.txt` contents:
-
-| Package | Min Version | Purpose |
-|---------|-------------|---------|
-| `fastapi` | 0.109.0 | HTTP API framework |
-| `uvicorn[standard]` | 0.27.0 | ASGI server (with uvloop/http2) |
-| `pydantic` | 2.5.0 | Data validation and serialization |
-| `python-dotenv` | 1.0.0 | Load .env environment variables |
-
-### 4. Configure Storage Path
-
-```bash
-cp .env.example .env
-```
-
-Edit `.env`:
-
-```bash
-# Note storage path (relative to project root)
-# Point to a cloud drive directory for automatic multi-device sync
-NOTE_STORAGE_PATH=../../3_datas/web_notes
-```
-
-> **Multi-device setup**: Use the same relative path on all devices. The `.env` file is git-ignored, so each device can have its own configuration.
-
-### 5. Build the Extension
+### 3. Build the Extension
 
 ```bash
 npm run build
 ```
 
-> **Note**: The `dist/` directory is git-ignored. Users must build the extension themselves. This ensures each build uses up-to-date dependencies and configuration.
+Build output goes to `dist/`.
 
-Build output in `dist/`:
-- `manifest.json` — Chrome extension manifest
-- `assets/` — bundled JS/CSS (hashed filenames with sourcemaps)
-- `src/sidebar/index.html` — side panel page
-- `src/styles/highlight.css` — highlight styles
-- `src/assets/icons/` — extension icons
-
-### 6. Load the Extension in Chrome
+### 4. Load the Extension in Chrome
 
 1. Open Chrome, navigate to `chrome://extensions/`
 2. Enable **Developer mode** (toggle in the top-right corner)
@@ -234,224 +180,64 @@ Build output in `dist/`:
 4. Select the `dist/` directory in this project
 5. The Web Notes icon appears in the toolbar — right-click to pin it
 
-### 7. Start the Backend
-
-```bash
-./backend/run.sh
-```
-
-Verify it's running:
-
-```bash
-curl http://127.0.0.1:2463/api/health
-# {"status":"ok","storage_path":"/path/to/notes","storage_exists":true}
-```
-
-> The storage directory is created automatically on first startup. For auto-start on boot, see [Auto-Start Backend](#auto-start-backend).
-
-### 8. Start Using
+### 5. Start Using
 
 Open any web page, select some text, right-click → **Highlight**, and you've created your first annotation.
 
-To open the sidebar:
-- Click the Web Notes icon in the Chrome toolbar
-- Or use the keyboard shortcut: `Ctrl+Shift+S` (customizable at `chrome://extensions/shortcuts`)
+To open the sidebar: click the Web Notes icon in the Chrome toolbar.
 
-## Configuration
+## Sync & Backup
 
-### config.json — Server Settings
+### Auto Sync (Recommended)
 
-```json
-{
-  "server": {
-    "host": "127.0.0.1",
-    "port": 2463
-  }
-}
-```
+In the sidebar footer, set Sync to **Auto** → click **Choose file** → select or create `web-notes.json` in your OneDrive / iCloud folder → done. Every highlight, edit, and deletion is automatically written back to the JSON file, and your cloud drive client syncs it across devices.
 
-The Python backend reads this via `json.load()`. The TypeScript extension imports it at build time (inlined by Vite). **After changing the port, restart the backend and rebuild the extension** (`npm run build`).
+### Manual Sync
 
-### .env — Private Settings
+Set Sync to **Manual** → choose a file the same way → click **↻ Sync now** whenever you want to sync.
 
-```bash
-NOTE_STORAGE_PATH=../../3_datas/web_notes
-```
+### Export/Import JSON (Manual Backup)
 
-- **Path type**: relative, resolved against the project root (`note/`)
-- **Why relative?**: absolute paths differ across devices; relative paths work consistently when the project and storage are both inside a cloud drive directory tree
-- **Default**: there is no default — the backend will fail to start without this configured
+- **↓ Export JSON**: downloads `web-notes-YYYY-MM-DD.json` to your local disk
+- **↑ Import JSON**: select a previously exported JSON file, merges into the current database (newer-wins — existing newer notes are not overwritten)
 
-## Auto-Start Backend
-
-`backend/run.sh` supports three modes:
-
-### Direct Start
-
-```bash
-./backend/run.sh
-```
-
-Runs in the foreground, logs to `logs/backend-<hostname>-<date>.log`. Automatic cleanup: deletes this device's logs older than 1 day, and any device's logs older than 7 days.
-
-### Install as systemd Service (Auto-Start on Boot)
-
-```bash
-./backend/run.sh --install
-```
-
-This will:
-1. Create `/etc/systemd/system/note-sync.service`
-2. Configure `Restart=always` with a 10-second delay on failure
-3. Auto-detect project path and conda location
-4. Run `systemctl enable` for auto-start on boot
-5. Immediately restart the service
-
-Check service status:
-
-```bash
-systemctl status note-sync
-```
-
-View logs:
-
-```bash
-journalctl -u note-sync -f        # Follow live
-tail -f logs/backend-*.log         # File-based logs
-```
-
-### Uninstall Service
-
-```bash
-./backend/run.sh --uninstall
-```
-
-Stops the service, disables auto-start, and removes the service file.
-
-## API Endpoints
-
-All endpoints are served at `http://127.0.0.1:2463/api/`.
-
-| Method | Path | Parameters | Description |
-|--------|------|------------|-------------|
-| `GET` | `/api/notes` | `url` (query, required) | Get all highlights for a page URL |
-| `POST` | `/api/notes` | JSON body: `CreateHighlightRequest` | Create or replace a highlight |
-| `PATCH` | `/api/notes/<id>` | `url` (query), JSON body: `{note?, color?}` | Update a highlight's note or color |
-| `DELETE` | `/api/notes/<id>` | `url` (query) | Delete a single highlight |
-| `GET` | `/api/search` | `q` (query, required, min_length=1) | Full-text search (matches text/note/title/URL) |
-| `GET` | `/api/domains` | — | List all domains with notes |
-| `GET` | `/api/pages` | — | List all pages with metadata (newest first) |
-| `DELETE` | `/api/pages` | `url` (query) | Delete all highlights for a page URL |
-| `GET` | `/api/export` | `domain` (query, optional) | Export notes as downloadable Markdown |
-| `GET` | `/api/health` | — | Health check |
-
-### Data Models
-
-Complete type definitions are in [src/shared/types.ts](src/shared/types.ts) (TypeScript) and [backend/models.py](backend/models.py) (Pydantic). Both are kept in sync.
-
-<details>
-<summary>Click to expand core model examples</summary>
-
-**CreateHighlightRequest**:
+### Sync JSON File Format
 
 ```json
 {
-  "url": "https://example.com/article",
-  "title": "Article Title",
-  "domain": "example.com",
-  "text": "Selected text to highlight",
-  "color": "yellow",
-  "note": "Optional Markdown note",
-  "anchor": {
-    "text": "Selected text to highlight",
-    "prefix": "Up to 100 preceding characters...",
-    "suffix": "Up to 100 following characters...",
-    "xpath": "/html/body/div/p[2]/text()[1]",
-    "offset": 42,
-    "endXpath": "",
-    "endOffset": 0
-  }
-}
-```
-
-**SearchResult**:
-
-```json
-{
-  "url": "https://example.com/article",
-  "title": "Article Title",
-  "domain": "example.com",
-  "highlight_id": "a1b2c3d4",
-  "match_text": "Matched highlight text",
-  "note": "Note content",
-  "context": "Surrounding context snippet with keyword match..."
-}
-```
-
-</details>
-
-## Storage Format
-
-```
-$NOTE_STORAGE_PATH/
-├── .index.json                          # Global index
-├── example.com/
-│   ├── example-com-article-slug.json    # Page note file
-│   └── example-com-another-slug.json
-└── github.com/
-    └── github-com-some-page-slug.json
-```
-
-### Page JSON Structure
-
-One JSON file per page. Filenames are derived from the URL path (non-alphanumeric characters replaced with hyphens, max 200 chars).
-
-```json
-{
-  "url": "https://example.com/article",
-  "title": "Article Title",
-  "domain": "example.com",
-  "created": "2026-06-29T10:30:00Z",
-  "updated": "2026-06-29T14:20:00Z",
-  "highlights": [
-    {
-      "id": "a1b2c3d4",
-      "text": "The original highlighted text",
-      "color": "yellow",
-      "note": "Markdown note content\n\n- [x] Completed task\n- [ ] Pending task",
-      "anchor": {
-        "text": "The original highlighted text",
-        "prefix": "Preceding context (up to 100 chars)",
-        "suffix": "Following context (up to 100 chars)",
-        "xpath": "/html/body/div/p[2]/text()[1]",
-        "offset": 42,
-        "endXpath": "",
-        "endOffset": 0
-      },
-      "created": "2026-06-29T10:30:00Z"
+  "version": 1,
+  "exported_at": "2026-06-30T10:00:00Z",
+  "domains": {
+    "example.com": {
+      "pages": [
+        {
+          "url": "https://example.com/article",
+          "title": "Article Title",
+          "highlights": [
+            {
+              "id": "a1b2c3d4",
+              "text": "The original highlighted text",
+              "color": "yellow",
+              "note": "Markdown note content",
+              "anchor": {
+                "text": "The original highlighted text",
+                "prefix": "Preceding context (up to 100 chars)",
+                "suffix": "Following context (up to 100 chars)",
+                "xpath": "/html/body/div/p[2]/text()[1]",
+                "offset": 42,
+                "endXpath": "",
+                "endOffset": 0
+              },
+              "created": "2026-06-29T10:30:00Z",
+              "updated": "2026-06-30T14:20:00Z"
+            }
+          ]
+        }
+      ]
     }
-  ]
-}
-```
-
-### Global Index (`.index.json`)
-
-```json
-{
-  "https://example.com/article": {
-    "title": "Article Title",
-    "domain": "example.com",
-    "updated": "2026-06-29T14:20:00Z",
-    "highlight_count": 5
   }
 }
 ```
-
-### Data Safety
-
-- All file writes use **atomic writes**: write to `.tmp` file first, then `os.replace` to the target — prevents corruption from concurrent access
-- All files use **UTF-8** encoding
-- Empty pages (all highlights deleted) automatically cleaned up; empty domain directories also removed
 
 ## Usage Guide
 
@@ -507,7 +293,7 @@ On every page load, the extension attempts to restore all highlights using a thr
 ### Local Development
 
 ```bash
-# Development mode (with HMR for sidebar/popup)
+# Development mode (with HMR)
 npm run dev
 
 # Type check + build
@@ -515,9 +301,6 @@ npm run build
 
 # Run tests
 npm run test
-
-# Test watch mode
-npm run test:watch
 ```
 
 ### Code Conventions
@@ -530,63 +313,45 @@ See [CLAUDE.md](CLAUDE.md) for the full development guide.
 - Type annotations on all parameters and return values (no `any`)
 - `async/await` only (no callback nesting)
 - File names: `snake_case`, classes: `PascalCase`, functions/variables: `camelCase`
-- Chrome API calls go through `shared/api.ts`
-
-**Python:**
-- PEP 8, 4-space indentation, 88-char line limit
-- Google-style docstrings (Args / Returns / Raises)
-- Type annotations on all functions (no `Any`)
-- Pydantic models for all request/response structures
 
 ### Extension Guide
 
 | Task | Steps |
 |------|-------|
-| **Add highlight color** | 1. Add value to `HighlightColor` in `src/shared/types.ts`<br>2. Add matching enum value in `backend/models.py`<br>3. Add CSS class in `src/styles/highlight.css` |
-| **Add API endpoint** | 1. Add route in `backend/server.py`<br>2. Add client method in `src/shared/api.ts`<br>3. Add message type in `src/shared/types.ts`<br>4. Add case in `src/background/index.ts` |
+| **Add highlight color** | 1. Add value to `HighlightColor` in `src/shared/types.ts`<br>2. Add CSS class in `src/styles/highlight.css` |
+| **Add data operation** | 1. Add method in `src/shared/db.ts`<br>2. Call `sync.maybeSync()` after write operations if needed |
 | **Add sidebar panel** | 1. Create component file in `src/sidebar/`<br>2. Register in `src/sidebar/index.ts`<br>3. Add tab and panel in `src/sidebar/index.html` |
-| **Change port** | 1. Edit `config.json`<br>2. Update `host_permissions` in `manifest.json`<br>3. Restart backend + `npm run build` |
+| **Add message type** | 1. Add type in `src/shared/types.ts`<br>2. Add case in `src/background/index.ts` |
 | **Regenerate icons** | `cd scripts && python generate_icons.py` |
 
 ## FAQ
 
 ### Right-click menu not showing?
 
-1. Verify the backend is running: `curl http://127.0.0.1:2463/api/health`
-2. Check the extension is loaded and enabled: `chrome://extensions/`
-3. The context menu only appears when **text is selected** and won't work on `chrome://` or `chrome-extension://` pages
+1. Check the extension is loaded and enabled: `chrome://extensions/`
+2. The context menu only appears when **text is selected** and won't work on `chrome://` or `chrome-extension://` pages
 
 ### Highlights disappear after refresh?
 
-Possible causes:
-1. Backend is not running — highlights are loaded from the backend on each page visit
-2. The page content changed significantly — all three recovery tiers failed, highlights are marked as broken (visible in sidebar)
-3. Check the browser console (F12 → Console) and backend logs (`logs/` directory)
+1. Data is stored in the browser's IndexedDB — it persists across page refreshes and browser restarts
+2. If the page content changed significantly, all three recovery tiers may fail; highlights are marked as broken (notes are still visible in the sidebar)
+3. Check the browser console (F12 → Console) for logs
 
 ### Cross-device sync not working?
 
-1. Verify all devices have `NOTE_STORAGE_PATH` in `.env` pointing to the same cloud drive directory
-2. Ensure the cloud drive client (OneDrive, etc.) is running and synced
-3. This project does not do network sync — it relies entirely on the cloud drive's file sync
+1. Ensure the same `web-notes.json` file is selected on both devices (inside a cloud drive directory)
+2. Ensure your cloud drive client (OneDrive, etc.) is running and synced
+3. If using manual sync mode, make sure you've clicked "Sync now"
+4. After importing a JSON file, an auto-sync is triggered if auto mode is enabled
 
-### How to change the port?
+### Sync file access lost?
 
-1. Edit `config.json` with the new port
-2. Edit `manifest.json`, add the new port to `host_permissions`
-3. Restart backend: `systemctl restart note-sync` (or re-run `./backend/run.sh`)
-4. Rebuild extension: `npm run build`
-5. Refresh the extension at `chrome://extensions/`
+If the sync JSON file is moved or deleted, the sidebar will show "Sync file access lost". Click **Choose file** again to re-select the file.
 
-### Backend fails with "ModuleNotFoundError: No module named 'backend'"?
+### How to back up my data?
 
-Make sure you're running from the **project root**:
-
-```bash
-cd /path/to/note
-python -m backend.server
-```
-
-Don't `cd` into the `backend/` directory first.
+1. **Automatic**: with sync enabled, a copy of `web-notes.json` always exists in your cloud drive folder
+2. **Manual**: click **↓ Export JSON** in the sidebar footer
 
 ## License
 

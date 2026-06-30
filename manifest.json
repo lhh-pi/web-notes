@@ -11,7 +11,6 @@
     "scripting"
   ],
   "host_permissions": [
-    "http://localhost:2463/*",
     "https://*/*",
     "http://*/*"
   ],

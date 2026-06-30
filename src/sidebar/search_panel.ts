@@ -3,7 +3,7 @@
  */
 
 import type { SearchResult } from '../shared/types';
-import * as api from '../shared/api';
+import * as db from '../shared/db';
 
 /** Debounce timer for search-as-you-type. */
 let debounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -49,20 +49,22 @@ export function initSearchPanel(
   });
 }
 
+/** Execute a search and render results. */
 async function performSearch(
   query: string,
   container: HTMLElement,
   emptyEl: HTMLElement,
 ): Promise<void> {
   try {
-    const response = await api.searchNotes(query);
-    renderSearchResults(response.results, container, emptyEl);
+    const results = await db.searchNotes(query);
+    renderSearchResults(results, container, emptyEl);
   } catch (err) {
     container.innerHTML = `<p class="wn-error">Search failed: ${err instanceof Error ? err.message : 'Unknown error'}</p>`;
     emptyEl.style.display = 'none';
   }
 }
 
+/** Render search result cards into the container. */
 function renderSearchResults(
   results: SearchResult[],
   container: HTMLElement,

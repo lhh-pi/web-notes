@@ -1,38 +1,34 @@
 /**
  * Background Service Worker.
  *
- * Acts as the bridge between:
- *   - Content Scripts (web page injection)
- *   - Sidebar (extension side panel)
- *   - Python Backend (localhost HTTP API)
+ * 消息路由中枢：Content Script ↔ Background ↔ IndexedDB
  *
- * Responsibilities:
- *   - Register and handle right-click context menu items
- *   - Route messages between content scripts and the Python API
- *   - Cache the current tab URL for the sidebar
+ * 职责：
+ *   - 注册右键菜单（高亮、高亮+笔记、颜色选择）
+ *   - Content Script 消息 → db.ts 调用 → 返回结果
+ *   - 广播刷新消息给 Sidebar
+ *   - 触发自动同步
  */
 
-import * as api from '../shared/api';
-import type { BackgroundMessage, ContentMessage, HighlightColor } from '../shared/types';
+import * as db from '../shared/db';
+import * as sync from '../shared/sync';
+import type { BackgroundMessage, ContentMessage, Highlight, HighlightColor } from '../shared/types';
 
 // ── Context menu setup ────────────────────────────────────────────────
 
 chrome.runtime.onInstalled.addListener(() => {
-  // Highlight (no note)
   chrome.contextMenus.create({
     id: 'highlight',
     title: 'Highlight',
     contexts: ['selection'],
   });
 
-  // Highlight with note
   chrome.contextMenus.create({
     id: 'highlight_note',
     title: 'Highlight & Add Note',
     contexts: ['selection'],
   });
 
-  // Color sub-menu
   chrome.contextMenus.create({
     id: 'highlight_color',
     title: 'Highlight (choose color)',
@@ -82,9 +78,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     return;
   }
 
-  // Send the action to the content script in the active tab
   chrome.tabs.sendMessage(tab.id, { action, color }).catch(() => {
-    // Content script may not be loaded (e.g., chrome:// pages)
     console.debug('[Web Notes] Could not send message to tab', tab.id);
   });
 });
@@ -92,9 +86,8 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // ── Message routing ───────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener(
-  (message: ContentMessage, sender, sendResponse) => {
-    // Handle messages from content scripts and sidebar
-    handleMessage(message, sender)
+  (message: ContentMessage, _sender, sendResponse) => {
+    handleMessage(message)
       .then((response) => sendResponse(response))
       .catch((err) => sendResponse({ type: 'ERROR', message: err.message }));
 
@@ -104,60 +97,86 @@ chrome.runtime.onMessage.addListener(
 
 async function handleMessage(
   message: ContentMessage,
-  _sender: chrome.runtime.MessageSender,
 ): Promise<BackgroundMessage | Record<string, unknown>> {
   try {
     switch (message.type) {
       case 'GET_NOTES': {
-        console.log('[Web Notes BG] GET_NOTES for:', message.url);
-        const data = await api.getNotes(message.url);
-        console.log('[Web Notes BG] GET_NOTES result highlights:', data?.highlights?.length || 0);
+        const data = await db.getNotes(message.url);
         return { type: 'NOTES_LOADED', data };
       }
 
       case 'CREATE_HIGHLIGHT': {
-        const data = await api.createHighlight(message.payload);
-        // Broadcast to sidebar so it refreshes in real time
+        // 生成 ID（UUID4 前 8 位，与旧 Python 后端一致）
+        const id = crypto.randomUUID().slice(0, 8);
+
+        const highlight: Highlight = {
+          id,
+          text: message.payload.text,
+          color: message.payload.color,
+          note: message.payload.note || '',
+          anchor: message.payload.anchor,
+          created: new Date().toISOString(),
+        };
+
+        const data = await db.saveHighlight(
+          message.payload.url,
+          message.payload.title,
+          message.payload.domain,
+          highlight,
+        );
+
+        // 触发自动同步
+        sync.maybeSync().catch(() => {});
+
+        // 广播刷新消息给 Sidebar
         chrome.runtime.sendMessage({ type: 'REFRESH_NOTES' }).catch(() => {});
         return { type: 'HIGHLIGHT_SAVED', data };
       }
 
       case 'UPDATE_HIGHLIGHT': {
-        const data = await api.updateHighlight(
+        const data = await db.updateHighlight(
           message.url,
           message.highlightId,
           message.note,
           message.color,
         );
+
+        sync.maybeSync().catch(() => {});
         chrome.runtime.sendMessage({ type: 'REFRESH_NOTES' }).catch(() => {});
         return { type: 'HIGHLIGHT_SAVED', data };
       }
 
       case 'DELETE_HIGHLIGHT': {
-        await api.deleteHighlight(message.url, message.highlightId);
+        await db.deleteHighlight(message.highlightId);
+
+        sync.maybeSync().catch(() => {});
         chrome.runtime.sendMessage({ type: 'REFRESH_NOTES' }).catch(() => {});
         return { type: 'HIGHLIGHT_DELETED', highlightId: message.highlightId };
       }
 
       case 'SEARCH': {
-        const data = await api.searchNotes(message.query);
-        return { type: 'SEARCH_RESULTS', data };
+        const results = await db.searchNotes(message.query);
+        return {
+          type: 'SEARCH_RESULTS',
+          data: { query: message.query, count: results.length, results },
+        };
       }
 
       case 'GET_DOMAINS': {
-        const data = await api.listDomains();
-        return { type: 'DOMAINS_LIST', data };
+        const domains = await db.listDomains();
+        return { type: 'DOMAINS_LIST', data: { domains } };
       }
 
-      case 'EXPORT': {
-        const markdown = await api.exportNotes(message.domain);
-        // Return the markdown text directly to the sidebar
-        return { type: 'SEARCH_RESULTS', data: { query: '', count: 0, results: [] }, exportText: markdown };
-      }
+      case 'EXPORT':
+        // 已废弃：导出功能由 Sidebar 直接调用 sync.exportToFile()
+        return { type: 'ERROR', message: 'Export is now handled directly by the sidebar.' };
 
       case 'BROKEN_HIGHLIGHTS':
-        // Forward to sidebar so it can mark broken cards
-        chrome.runtime.sendMessage({ type: 'BROKEN_HIGHLIGHTS', url: message.url, brokenIds: message.brokenIds }).catch(() => {});
+        chrome.runtime.sendMessage({
+          type: 'BROKEN_HIGHLIGHTS',
+          url: message.url,
+          brokenIds: message.brokenIds,
+        }).catch(() => {});
         return { type: 'OK' };
 
       default:
@@ -174,15 +193,13 @@ async function handleMessage(
 // ── Side panel click handler ──────────────────────────────────────────
 
 chrome.action.onClicked.addListener((tab) => {
-  // The side panel is opened via the action API (Chrome 114+)
-  // For older versions, this falls back to the popup
   if (tab.id && tab.windowId) {
     chrome.sidePanel.open({ windowId: tab.windowId }).catch(() => {
-      // sidePanel API not available, fall back to popup behavior
       chrome.action.setPopup({ popup: 'sidebar/index.html' });
     });
   }
 });
 
-// Log that the worker is alive (useful for debugging)
+// ── Initialize ────────────────────────────────────────────────────────
+
 console.log('[Web Notes] Background worker started');

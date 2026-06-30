@@ -509,12 +509,63 @@
 /* ── Footer ──────────────────────────────────────────────────────────── */
 
 .wn-footer {
-  padding: 10px 16px;
+  padding: 8px 12px;
   border-top: 1px solid var(--wn-border);
   background: var(--wn-bg-secondary);
   flex-shrink: 0;
-  text-align: center;
 }
-.wn-footer .wn-btn {
-  width: 100%;
+
+/* ── Sync section ────────────────────────────────────────────────────── */
+
+.wn-sync-section {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  flex-wrap: wrap;
+}
+
+.wn-sync-label {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+  color: var(--wn-text-secondary);
+  white-space: nowrap;
+}
+
+.wn-sync-select {
+  font-size: 11px;
+  padding: 2px 4px;
+  border: 1px solid var(--wn-border);
+  border-radius: 3px;
+  background: var(--wn-bg);
+  color: var(--wn-text);
+  cursor: pointer;
+}
+
+.wn-sync-status {
+  font-size: 10px;
+  color: var(--wn-accent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 120px;
+}
+
+.wn-sync-error {
+  color: #e74c3c;
+}
+
+/* ── Import/Export section ──────────────────────────────────────────── */
+
+.wn-io-section {
+  display: flex;
+  gap: 6px;
+}
+
+.wn-io-section .wn-btn {
+  flex: 1;
+  font-size: 11px;
+  padding: 4px 8px;
 }

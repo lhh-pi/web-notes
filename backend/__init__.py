@@ -1,1 +1,0 @@
-# Web Notes backend package

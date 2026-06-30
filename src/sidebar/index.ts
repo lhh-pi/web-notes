@@ -1,16 +1,14 @@
 /**
  * Sidebar entry point.
  *
- * Manages the side panel UI: tab switching, page notes, search, export.
- * Communicates with the background worker and Python backend via chrome.runtime.
+ * 管理侧边面板 UI：标签切换、页面笔记、全局列表、搜索、同步控制。
+ * 直接调用 db.ts（IndexedDB）和 sync.ts（文件同步），无需 Python 后端。
  */
 
-import type {
-  BackgroundMessage,
-  GetNotesResponse,
-  PageEntry,
-} from '../shared/types';
-import * as api from '../shared/api';
+import type { BackgroundMessage, GetNotesResponse } from '../shared/types';
+import type { PageSummary } from '../shared/db';
+import * as db from '../shared/db';
+import * as sync from '../shared/sync';
 import { renderNoteList } from './note_list';
 import { renderPageList, filterPages } from './page_list';
 import { initSearchPanel } from './search_panel';
@@ -32,12 +30,19 @@ const noPagesEl = document.getElementById('no-pages')!;
 const searchInput = document.getElementById('search-input') as HTMLInputElement;
 const searchResults = document.getElementById('search-results')!;
 const noResultsEl = document.getElementById('no-results')!;
-const exportBtn = document.getElementById('export-btn')! as HTMLButtonElement;
 const themeToggle = document.getElementById('theme-toggle')!;
+
+// Sync controls
+const syncModeSelect = document.getElementById('sync-mode-select') as HTMLSelectElement;
+const syncFileBtn = document.getElementById('sync-file-btn')! as HTMLButtonElement;
+const syncNowBtn = document.getElementById('sync-now-btn')! as HTMLButtonElement;
+const syncStatus = document.getElementById('sync-status')! as HTMLSpanElement;
+const exportJsonBtn = document.getElementById('export-json-btn')! as HTMLButtonElement;
+const importJsonBtn = document.getElementById('import-json-btn')! as HTMLButtonElement;
 
 // ── Cached page data ──────────────────────────────────────────────────
 
-let allPages: PageEntry[] = [];
+let allPages: PageSummary[] = [];
 let brokenIds: Set<string> = new Set();
 
 // ── Tab switching ─────────────────────────────────────────────────────
@@ -47,21 +52,17 @@ tabs.forEach((tab) => {
     const target = tab.dataset.tab;
     if (!target) return;
 
-    // Update tab active states
     tabs.forEach((t) => t.classList.remove('wn-tab--active'));
     tab.classList.add('wn-tab--active');
 
-    // Update panel visibility
     Object.entries(panels).forEach(([key, panel]) => {
       panel.classList.toggle('wn-panel--active', key === target);
     });
 
-    // Focus search input when switching to search tab
     if (target === 'search') {
       searchInput.focus();
     }
 
-    // Load all pages when switching to All Notes tab
     if (target === 'all') {
       loadAllPages();
     }
@@ -76,11 +77,9 @@ applyTheme();
 themeToggle.addEventListener('click', () => {
   darkMode = !darkMode;
   applyTheme();
-  // Persist preference
   chrome.storage.local.set({ darkMode });
 });
 
-// Restore saved preference
 chrome.storage.local.get('darkMode', (result) => {
   if (result.darkMode !== undefined) {
     darkMode = result.darkMode;
@@ -90,13 +89,12 @@ chrome.storage.local.get('darkMode', (result) => {
 
 function applyTheme(): void {
   document.body.classList.toggle('wn-dark', darkMode);
-  themeToggle.textContent = darkMode ? '☀' : '☽'; // Sun / Moon
+  themeToggle.textContent = darkMode ? '☀' : '☽';
 }
 
 // ── Load page notes ───────────────────────────────────────────────────
 
 async function loadPageNotes(): Promise<void> {
-  // Get the active tab URL
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
   const url = tabs[0]?.url;
   if (!url) {
@@ -114,7 +112,6 @@ async function loadPageNotes(): Promise<void> {
           if (chrome.runtime.lastError) {
             reject(new Error(chrome.runtime.lastError.message));
           } else {
-            // Background wraps the response: { type: 'NOTES_LOADED', data: PageNote }
             resolve((res as { data?: GetNotesResponse }) || {});
           }
         },
@@ -136,69 +133,11 @@ async function loadPageNotes(): Promise<void> {
   }
 }
 
-// ── Export ────────────────────────────────────────────────────────────
-
-exportBtn.addEventListener('click', async () => {
-  exportBtn.textContent = 'Exporting...';
-  exportBtn.disabled = true;
-
-  try {
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    const domain = tabs[0]?.url ? new URL(tabs[0].url).hostname : '';
-
-    // Get export from background
-    const markdown = await new Promise<string>((resolve, reject) => {
-      chrome.runtime.sendMessage(
-        { type: 'EXPORT', domain },
-        (res: string) => {
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
-          } else {
-            resolve(res);
-          }
-        },
-      );
-    });
-
-    // Download the file
-    const blob = new Blob([markdown], { type: 'text/markdown;charset=utf-8' });
-    const blobUrl = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = blobUrl;
-    a.download = `notes-${domain || 'all'}.md`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(blobUrl);
-  } catch (err) {
-    console.error('[Web Notes] Export failed:', err);
-  } finally {
-    exportBtn.textContent = 'Export Notes';
-    exportBtn.disabled = false;
-  }
-});
-
-// ── Listen for messages from background ───────────────────────────────
-
-chrome.runtime.onMessage.addListener((message: BackgroundMessage | { type: string }) => {
-  if (message.type === 'BROKEN_HIGHLIGHTS') {
-    const msg = message as { type: string; url: string; brokenIds: string[] };
-    brokenIds = new Set(msg.brokenIds);
-    loadPageNotes();
-    return;
-  }
-  if (message.type === 'REFRESH_NOTES' || message.type === 'HIGHLIGHT_SAVED' || message.type === 'HIGHLIGHT_DELETED') {
-    loadPageNotes();
-    loadAllPages();
-  }
-});
-
-// ── All pages ───────────────────────────────────────────────────────────
+// ── All pages ─────────────────────────────────────────────────────────
 
 async function loadAllPages(): Promise<void> {
   try {
-    const response = await api.listPages();
-    allPages = response.pages || [];
+    allPages = await db.listPages();
     renderFilteredPages();
   } catch {
     pageList.innerHTML = '<p class="wn-error">Failed to load pages.</p>';
@@ -222,18 +161,149 @@ pageFilterInput.addEventListener('input', () => {
   renderFilteredPages();
 });
 
+// ── Sync controls ─────────────────────────────────────────────────────
+
+/** 初始化同步 UI：恢复保存的模式和文件状态。 */
+async function initSyncUI(): Promise<void> {
+  // 恢复同步模式
+  const mode = await sync.getSyncMode();
+  syncModeSelect.value = mode;
+  updateSyncUI(mode);
+
+  // 恢复同步文件状态
+  const fileName = await sync.getSyncFileName();
+  if (fileName) {
+    syncFileBtn.textContent = fileName;
+    syncFileBtn.title = `Sync file: ${fileName}`;
+  }
+}
+
+/** 根据同步模式更新 UI 可见性。 */
+function updateSyncUI(mode: sync.SyncMode): void {
+  syncNowBtn.style.display = mode === 'manual' ? '' : 'none';
+}
+
+/** 更新同步状态提示。 */
+function setSyncStatus(text: string, isError = false): void {
+  syncStatus.textContent = text;
+  syncStatus.className = isError ? 'wn-sync-status wn-sync-error' : 'wn-sync-status';
+  if (text) {
+    setTimeout(() => {
+      if (syncStatus.textContent === text) {
+        syncStatus.textContent = '';
+      }
+    }, 3000);
+  }
+}
+
+syncModeSelect.addEventListener('change', async () => {
+  const mode = syncModeSelect.value as sync.SyncMode;
+  await sync.setSyncMode(mode);
+  updateSyncUI(mode);
+
+  if (mode === 'auto') {
+    // 切换到自动模式时立即同步一次
+    try {
+      await sync.syncNow();
+      setSyncStatus('Synced ✓');
+    } catch {
+      setSyncStatus('Sync failed — select a file first', true);
+    }
+  }
+});
+
+syncFileBtn.addEventListener('click', async () => {
+  syncFileBtn.disabled = true;
+  syncFileBtn.textContent = '...';
+  try {
+    const name = await sync.selectSyncFile();
+    if (name) {
+      syncFileBtn.textContent = name;
+      syncFileBtn.title = `Sync file: ${name}`;
+      setSyncStatus('Sync file configured ✓');
+    } else {
+      syncFileBtn.textContent = 'Choose file...';
+    }
+  } catch (err) {
+    setSyncStatus(err instanceof Error ? err.message : 'Failed to select file', true);
+    syncFileBtn.textContent = 'Choose file...';
+  } finally {
+    syncFileBtn.disabled = false;
+  }
+});
+
+syncNowBtn.addEventListener('click', async () => {
+  syncNowBtn.disabled = true;
+  syncNowBtn.textContent = 'Syncing...';
+  try {
+    await sync.syncNow();
+    setSyncStatus('Synced ✓');
+  } catch (err) {
+    setSyncStatus(err instanceof Error ? err.message : 'Sync failed', true);
+  } finally {
+    syncNowBtn.disabled = false;
+    syncNowBtn.textContent = '↻ Sync now';
+  }
+});
+
+exportJsonBtn.addEventListener('click', async () => {
+  exportJsonBtn.disabled = true;
+  exportJsonBtn.textContent = 'Exporting...';
+  try {
+    await sync.exportToFile();
+    setSyncStatus('Exported ✓');
+  } catch (err) {
+    setSyncStatus(err instanceof Error ? err.message : 'Export failed', true);
+  } finally {
+    exportJsonBtn.disabled = false;
+    exportJsonBtn.textContent = '↓ Export JSON';
+  }
+});
+
+importJsonBtn.addEventListener('click', async () => {
+  importJsonBtn.disabled = true;
+  importJsonBtn.textContent = 'Importing...';
+  try {
+    const result = await sync.importFromFile();
+    if (result) {
+      setSyncStatus(`Imported ${result.imported}, skipped ${result.skipped} ✓`);
+      loadAllPages();
+      loadPageNotes();
+    }
+  } catch (err) {
+    setSyncStatus(err instanceof Error ? err.message : 'Import failed', true);
+  } finally {
+    importJsonBtn.disabled = false;
+    importJsonBtn.textContent = '↑ Import JSON';
+  }
+});
+
+// ── Listen for messages from background ───────────────────────────────
+
+chrome.runtime.onMessage.addListener((message: BackgroundMessage | { type: string }) => {
+  if (message.type === 'BROKEN_HIGHLIGHTS') {
+    const msg = message as { type: string; url: string; brokenIds: string[] };
+    brokenIds = new Set(msg.brokenIds);
+    loadPageNotes();
+    return;
+  }
+  if (
+    message.type === 'REFRESH_NOTES' ||
+    message.type === 'HIGHLIGHT_SAVED' ||
+    message.type === 'HIGHLIGHT_DELETED'
+  ) {
+    loadPageNotes();
+    loadAllPages();
+  }
+});
+
 // ── Initialize ────────────────────────────────────────────────────────
 
-// Initialize search panel
 initSearchPanel(searchInput, searchResults, noResultsEl);
-
-// Load notes for the current page
+initSyncUI();
 loadPageNotes();
-
-// Preload all pages in background
 loadAllPages();
 
-// Refresh notes when the active tab changes
 chrome.tabs.onActivated.addListener(() => {
   loadPageNotes();
 });
