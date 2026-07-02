@@ -34,7 +34,7 @@ A Chrome browser extension for web page annotation — highlight text, take Mark
   - **All Notes**: all pages grouped by domain, expandable/collapsible, filter by title/URL, open in new tab, delete single pages or entire domains
   - **Search**: cross-site full-text search (300ms debounce + Enter for instant search), matches highlight text, note content, page title, and URL
 - **Dark Mode**: sidebar and bubble UI support dark/light theme, follows system `prefers-color-scheme` on first launch, manual toggle persisted
-- **Multi-Device Sync**: sync data to a single JSON file via File System Access API. Works with OneDrive, iCloud, or any cloud drive for automatic cross-device sync. Supports both automatic and manual sync modes
+- **Multi-Device Sync**: sync data to a single JSON file via File System Access API. Works with OneDrive, iCloud, or any cloud drive for cross-device sync. Supports manual and automatic modes (**manual recommended**)
 - **Export/Import**: export all notes as a JSON file for backup; import from a JSON file with newer-wins merge strategy
 
 ## Architecture
@@ -188,13 +188,15 @@ To open the sidebar: click the Web Notes icon in the Chrome toolbar.
 
 ## Sync & Backup
 
-### Auto Sync (Recommended)
+> **Manual sync is recommended.** Due to Chrome's File System Access API limitations, Auto mode cannot persistently retain file write permissions. After a period of inactivity, the permission is revoked and you will be prompted to re-authorize. Manual mode keeps your data safely in IndexedDB — just open the sidebar and click one button to sync.
 
-In the sidebar footer, set Sync to **Auto** → click **Choose file** → select or create `web-notes.json` in your OneDrive / iCloud folder → done. Every highlight, edit, and deletion is automatically written back to the JSON file, and your cloud drive client syncs it across devices.
+### Manual Sync (Recommended)
 
-### Manual Sync
+Set Sync to **Manual** → click **Choose file** → select or create `web-notes.json` in your OneDrive / iCloud folder → click **↻ Sync now** whenever you want to sync. Each sync performs a bidirectional newer-wins merge — no data loss.
 
-Set Sync to **Manual** → choose a file the same way → click **↻ Sync now** whenever you want to sync.
+### Auto Sync
+
+Set Sync to **Auto** → choose a file the same way. Highlights, edits, and deletions are written to the JSON file automatically. **Note: write permission may be lost after idle time, triggering a warning banner at the top of the page. Re-authorize in the sidebar or switch to Manual mode.**
 
 ### Export/Import JSON (Manual Backup)
 
@@ -342,17 +344,18 @@ See [CLAUDE.md](CLAUDE.md) for the full development guide.
 1. Ensure the same `web-notes.json` file is selected on both devices (inside a cloud drive directory)
 2. Ensure your cloud drive client (OneDrive, etc.) is running and synced
 3. If using manual sync mode, make sure you've clicked "Sync now"
-4. After importing a JSON file, an auto-sync is triggered if auto mode is enabled
 
-### Sync file access lost?
+### Why does Auto Sync keep asking for permission?
 
-If the sync JSON file is moved or deleted, the sidebar will show "Sync file access lost". Click **Choose file** again to re-select the file.
+This is a Chrome File System Access API security restriction with no current workaround. Chrome does not allow extensions to persistently hold file write permissions in the background — they are revoked after idle time. **Switching to Manual mode is recommended.** Your data remains safe in IndexedDB; sync with one click when the sidebar is open.
+
+### Sync file moved or deleted?
+
+If the sync JSON file is moved or deleted, sync operations will fail. Click **Choose (Change)** to re-select the file.
 
 ### How to back up my data?
 
-1. **Automatic**: with sync enabled, a copy of `web-notes.json` always exists in your cloud drive folder
+1. **Sync backup**: with sync enabled, a copy of `web-notes.json` always exists in your cloud drive folder
 2. **Manual**: click **↓ Export JSON** in the sidebar footer
 
 ## License
-
-MIT License

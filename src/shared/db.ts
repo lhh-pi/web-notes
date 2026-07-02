@@ -1,7 +1,6 @@
 /**
  * IndexedDB 存储层
  *
- * 替代 Python 后端 storage.py + search.py + export.py，
  * 提供浏览器原生的笔记存储、搜索和导出功能。
  *
  * 数据库结构：
@@ -9,17 +8,26 @@
  *   ├── ObjectStore: notes (keyPath: id)
  *   │    索引: url, domain, created
  *   └── ObjectStore: settings (keyPath: key)
- *        存储: syncMode, syncFileHandle 等配置
+ *        存储: syncMode, syncFileHandle, lastSyncAt 等配置
+ *
+ * 软删除策略：
+ *   删除操作不物理移除记录，只标记 deleted: true 和 updated 时间戳。
+ *   合并时若本机记录为软删除且 updated 更新，则拒绝文件中的同名记录。
+ *   导出时自动清理超过 SOFT_DELETE_TTL（30天）的软删除记录。
  */
 
 import type { Highlight, HighlightColor, PageNote, SearchResult, TextAnchor } from './types';
 
-// ---- 数据库 Schema --------------------------------------------------------
+// ---- 常量 ----------------------------------------------------------------
 
 const DB_NAME = 'web-notes';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // 升级：新增 deleted 字段，支持软删除
+/** 软删除记录的保留天数。超过后导出时物理清除。 */
+const SOFT_DELETE_TTL_DAYS = 7;
+const SOFT_DELETE_TTL_MS = SOFT_DELETE_TTL_DAYS * 24 * 60 * 60 * 1000;
 
-/** IndexedDB 中存储的单条笔记记录。 */
+// ---- 数据库 Schema --------------------------------------------------------
+
 interface NoteRecord {
   id: string;
   url: string;
@@ -31,13 +39,14 @@ interface NoteRecord {
   anchor: TextAnchor;
   created: string;
   updated: string;
+  /** 软删除标记。存在且为 true 时表示已被删除（保留用于合并判断）。 */
+  deleted?: boolean;
 }
 
 // ---- 数据库连接（单例）---------------------------------------------------
 
 let dbPromise: Promise<IDBDatabase> | null = null;
 
-/** 获取数据库连接。首次调用时自动创建数据库和索引。 */
 function getDB(): Promise<IDBDatabase> {
   if (dbPromise) return dbPromise;
 
@@ -68,12 +77,10 @@ function getDB(): Promise<IDBDatabase> {
 
 // ---- 辅助函数 ------------------------------------------------------------
 
-/** 返回当前 ISO 8601 时间戳。 */
 function now(): string {
   return new Date().toISOString();
 }
 
-/** 从 URL 提取域名。 */
 function domainFromUrl(url: string): string {
   try {
     return new URL(url).hostname;
@@ -82,7 +89,6 @@ function domainFromUrl(url: string): string {
   }
 }
 
-/** 将 IndexedDB 记录转换为外部的 Highlight 类型。 */
 function toHighlight(r: NoteRecord): Highlight {
   return {
     id: r.id,
@@ -94,7 +100,18 @@ function toHighlight(r: NoteRecord): Highlight {
   };
 }
 
-/** 将 IDBRequest 包装为 Promise。 */
+/** 记录是否已过期（可物理清除）。 */
+function isExpired(r: NoteRecord): boolean {
+  if (!r.deleted) return false;
+  const age = Date.now() - new Date(r.updated).getTime();
+  return age > SOFT_DELETE_TTL_MS;
+}
+
+/** 过滤出活跃（未删除）的记录。 */
+function isActive(r: NoteRecord): boolean {
+  return !r.deleted;
+}
+
 function promisify<T>(request: IDBRequest<T>): Promise<T> {
   return new Promise((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
@@ -102,7 +119,6 @@ function promisify<T>(request: IDBRequest<T>): Promise<T> {
   });
 }
 
-/** 等待事务完成。 */
 function txComplete(tx: IDBTransaction): Promise<void> {
   return new Promise((resolve, reject) => {
     tx.oncomplete = () => resolve();
@@ -112,35 +128,30 @@ function txComplete(tx: IDBTransaction): Promise<void> {
 
 // ---- CRUD 操作 -----------------------------------------------------------
 
-/**
- * 获取指定 URL 页面的所有高亮笔记。
- * 返回结果按创建时间排序。
- */
+/** 获取指定 URL 页面的所有活跃高亮，按创建时间排序。 */
 export async function getNotes(url: string): Promise<PageNote> {
   const db = await getDB();
   const tx = db.transaction('notes', 'readonly');
   const index = tx.objectStore('notes').index('url');
   const records: NoteRecord[] = await promisify(index.getAll(url));
 
-  const highlights = records.map(toHighlight).sort(
+  const active = records.filter(isActive);
+  const highlights = active.map(toHighlight).sort(
     (a, b) => a.created.localeCompare(b.created),
   );
 
-  const first = records[0];
+  const first = active[0];
   return {
     url,
     title: first?.title ?? '',
     domain: domainFromUrl(url),
     highlights,
     created: first?.created ?? now(),
-    updated: records.reduce((latest, r) => r.updated > latest ? r.updated : latest, ''),
+    updated: active.reduce((latest, r) => r.updated > latest ? r.updated : latest, ''),
   };
 }
 
-/**
- * 保存一条新高亮。如果 id 已存在则覆盖（幂等）。
- * 返回更新后的页面笔记。
- */
+/** 保存一条新高亮（幂等）。 */
 export async function saveHighlight(
   url: string,
   title: string,
@@ -161,6 +172,7 @@ export async function saveHighlight(
     anchor: highlight.anchor,
     created: highlight.created || timestamp,
     updated: timestamp,
+    deleted: false,
   };
 
   const tx = db.transaction('notes', 'readwrite');
@@ -170,16 +182,7 @@ export async function saveHighlight(
   return getNotes(url);
 }
 
-/**
- * 更新一条高亮的笔记内容和/或颜色。
- *
- * @param url - 页面 URL
- * @param highlightId - 高亮 ID
- * @param note - 可选的 Markdown 笔记
- * @param color - 可选的高亮颜色
- * @returns 更新后的页面笔记
- * @throws 如果高亮不存在
- */
+/** 更新笔记和/或颜色。 */
 export async function updateHighlight(
   url: string,
   highlightId: string,
@@ -198,6 +201,7 @@ export async function updateHighlight(
   if (note !== undefined) record.note = note;
   if (color !== undefined) record.color = color;
   record.updated = now();
+  record.deleted = false; // 确保未删除状态
 
   await promisify(store.put(record));
   await txComplete(tx);
@@ -205,37 +209,50 @@ export async function updateHighlight(
   return getNotes(url);
 }
 
-/** 删除一条高亮（通过 ID 直接删除，id 是全局唯一的）。 */
+/** 软删除一条高亮。 */
 export async function deleteHighlight(highlightId: string): Promise<void> {
   const db = await getDB();
   const tx = db.transaction('notes', 'readwrite');
-  await promisify(tx.objectStore('notes').delete(highlightId));
+  const store = tx.objectStore('notes');
+
+  const record: NoteRecord = await promisify(store.get(highlightId));
+  if (!record) return;
+
+  record.deleted = true;
+  record.updated = now();
+  await promisify(store.put(record));
   await txComplete(tx);
 }
 
-/** 删除某个页面的所有高亮。 */
+/** 软删除某页面的所有高亮。 */
 export async function deletePage(url: string): Promise<void> {
   const db = await getDB();
   const tx = db.transaction('notes', 'readwrite');
   const index = tx.objectStore('notes').index('url');
   const records: NoteRecord[] = await promisify(index.getAll(url));
+  const timestamp = now();
 
   for (const r of records) {
-    tx.objectStore('notes').delete(r.id);
+    r.deleted = true;
+    r.updated = timestamp;
+    tx.objectStore('notes').put(r);
   }
 
   await txComplete(tx);
 }
 
-/** 删除某个域名下的所有高亮。 */
+/** 软删除某域名下的所有高亮。 */
 export async function deleteDomain(domain: string): Promise<void> {
   const db = await getDB();
   const tx = db.transaction('notes', 'readwrite');
   const index = tx.objectStore('notes').index('domain');
   const records: NoteRecord[] = await promisify(index.getAll(domain));
+  const timestamp = now();
 
   for (const r of records) {
-    tx.objectStore('notes').delete(r.id);
+    r.deleted = true;
+    r.updated = timestamp;
+    tx.objectStore('notes').put(r);
   }
 
   await txComplete(tx);
@@ -243,13 +260,7 @@ export async function deleteDomain(domain: string): Promise<void> {
 
 // ---- 搜索 ----------------------------------------------------------------
 
-/**
- * 全文搜索所有笔记。
- *
- * 搜索范围：高亮文本、笔记内容、页面标题、URL。
- * 权重：笔记匹配 ×2，标题匹配 ×0.5，URL 匹配 ×0.3。
- * 最多返回 50 条结果，按分数降序。
- */
+/** 全文搜索（仅搜索活跃记录）。 */
 export async function searchNotes(query: string): Promise<SearchResult[]> {
   const db = await getDB();
   const tx = db.transaction('notes', 'readonly');
@@ -259,16 +270,13 @@ export async function searchNotes(query: string): Promise<SearchResult[]> {
   const scored: Array<{ result: SearchResult; score: number }> = [];
 
   for (const r of records) {
-    let score = 0;
-    const textLower = r.text.toLowerCase();
-    const noteLower = r.note.toLowerCase();
-    const titleLower = r.title.toLowerCase();
-    const urlLower = r.url.toLowerCase();
+    if (!isActive(r)) continue;
 
-    if (textLower.includes(q)) score += q.length;
-    if (noteLower.includes(q)) score += q.length * 2;
-    if (titleLower.includes(q)) score += q.length * 0.5;
-    if (urlLower.includes(q)) score += q.length * 0.3;
+    let score = 0;
+    if (r.text.toLowerCase().includes(q)) score += q.length;
+    if (r.note.toLowerCase().includes(q)) score += q.length * 2;
+    if (r.title.toLowerCase().includes(q)) score += q.length * 0.5;
+    if (r.url.toLowerCase().includes(q)) score += q.length * 0.3;
 
     if (score > 0) {
       scored.push({
@@ -290,7 +298,6 @@ export async function searchNotes(query: string): Promise<SearchResult[]> {
   return scored.slice(0, 50).map((s) => s.result);
 }
 
-/** 提取查询匹配周围的上下文片段（最多 120 字符）。 */
 function snippet(text: string, query: string, maxLen = 120): string {
   const lower = text.toLowerCase();
   const idx = lower.indexOf(query.toLowerCase());
@@ -303,19 +310,17 @@ function snippet(text: string, query: string, maxLen = 120): string {
   return s;
 }
 
-// ---- 列表查询 ------------------------------------------------------------
+// ---- 列表查询（仅活跃记录）-----------------------------------------------
 
-/** 列出所有包含笔记的域名（按字母排序）。 */
 export async function listDomains(): Promise<string[]> {
   const db = await getDB();
   const tx = db.transaction('notes', 'readonly');
   const records: NoteRecord[] = await promisify(tx.objectStore('notes').getAll());
 
-  const domains = new Set(records.map((r) => r.domain));
+  const domains = new Set(records.filter(isActive).map((r) => r.domain));
   return Array.from(domains).sort();
 }
 
-/** 页面摘要信息。 */
 export interface PageSummary {
   url: string;
   title: string;
@@ -324,11 +329,51 @@ export interface PageSummary {
   updated: string;
 }
 
-/** 列出所有页面及其高亮统计（按更新时间降序）。 */
+/**
+ * 物理删除所有过期的软删除记录。
+ * 返回删除数量。可安全重复调用。
+ */
+/** 清空所有数据（物理删除 notes + settings），完整重置。 */
+export async function clearAll(): Promise<void> {
+  const db = await getDB();
+  // 清空笔记
+  const txNotes = db.transaction('notes', 'readwrite');
+  const records: NoteRecord[] = await promisify(txNotes.objectStore('notes').getAll());
+  for (const r of records) {
+    txNotes.objectStore('notes').delete(r.id);
+  }
+  await txComplete(txNotes);
+  // 清空设置（同步模式、文件句柄、主题偏好、时间戳等）
+  const txSettings = db.transaction('settings', 'readwrite');
+  const allSettings = await promisify(txSettings.objectStore('settings').getAll());
+  for (const s of allSettings) {
+    txSettings.objectStore('settings').delete(s.key);
+  }
+  await txComplete(txSettings);
+}
+
+export async function purgeExpired(): Promise<number> {
+  const db = await getDB();
+  const tx = db.transaction('notes', 'readwrite');
+  const records: NoteRecord[] = await promisify(tx.objectStore('notes').getAll());
+  let deleted = 0;
+
+  for (const r of records) {
+    if (isExpired(r)) {
+      tx.objectStore('notes').delete(r.id);
+      deleted++;
+    }
+  }
+
+  await txComplete(tx);
+  return deleted;
+}
+
 export async function listPages(): Promise<PageSummary[]> {
   const db = await getDB();
   const tx = db.transaction('notes', 'readonly');
   const records: NoteRecord[] = await promisify(tx.objectStore('notes').getAll());
+  const active = records.filter(isActive);
 
   const pageMap = new Map<string, {
     title: string;
@@ -337,7 +382,7 @@ export async function listPages(): Promise<PageSummary[]> {
     updated: string;
   }>();
 
-  for (const r of records) {
+  for (const r of active) {
     const existing = pageMap.get(r.url);
     if (existing) {
       existing.count++;
@@ -354,11 +399,6 @@ export async function listPages(): Promise<PageSummary[]> {
 
 // ---- 设置操作 ------------------------------------------------------------
 
-/**
- * 读取一个设置项。
- *
- * @returns 设置值，如果不存在则返回 null
- */
 export async function getSetting<T = unknown>(key: string): Promise<T | null> {
   const db = await getDB();
   const tx = db.transaction('settings', 'readonly');
@@ -368,7 +408,6 @@ export async function getSetting<T = unknown>(key: string): Promise<T | null> {
   return result?.value ?? null;
 }
 
-/** 写入一个设置项。 */
 export async function setSetting(key: string, value: unknown): Promise<void> {
   const db = await getDB();
   const tx = db.transaction('settings', 'readwrite');
@@ -378,7 +417,6 @@ export async function setSetting(key: string, value: unknown): Promise<void> {
 
 // ---- JSON 导出/导入 ------------------------------------------------------
 
-/** 同步 JSON 文件的数据格式。 */
 export interface SyncFileFormat {
   version: 1;
   exported_at: string;
@@ -394,20 +432,36 @@ export interface SyncFileFormat {
         anchor: TextAnchor;
         created: string;
         updated: string;
+        /** 软删除标记（可选），存在且为 true 时表示该记录已被删除。 */
+        deleted?: boolean;
       }>;
     }>;
   }>;
 }
 
-/** 全量导出 IndexedDB 为结构化 JSON 对象。 */
+/**
+ * 全量导出 IndexedDB → JSON 对象。
+ *
+ * 导出逻辑：
+ *   1. 包含活跃记录 + 未过期的软删除记录
+ *   2. 超过 SOFT_DELETE_TTL_DAYS 天的软删除记录 → 物理删除（不导出 + 从 DB 移除）
+ *   3. 导出后页面 highlights 为空 → 该页面不导出
+ *   4. 导出后域名 pages 为空 → 该域名不导出
+ */
 export async function exportToJSON(): Promise<SyncFileFormat> {
   const db = await getDB();
-  const tx = db.transaction('notes', 'readonly');
+  const tx = db.transaction('notes', 'readwrite');
   const records: NoteRecord[] = await promisify(tx.objectStore('notes').getAll());
 
   const domains: SyncFileFormat['domains'] = {};
 
   for (const r of records) {
+    // 过期的软删除记录 → 物理删除
+    if (isExpired(r)) {
+      tx.objectStore('notes').delete(r.id);
+      continue;
+    }
+
     if (!domains[r.domain]) {
       domains[r.domain] = { pages: [] };
     }
@@ -418,7 +472,7 @@ export async function exportToJSON(): Promise<SyncFileFormat> {
       domains[r.domain].pages.push(page);
     }
 
-    page.highlights.push({
+    const hl: SyncFileFormat['domains'][string]['pages'][number]['highlights'][number] = {
       id: r.id,
       text: r.text,
       color: r.color,
@@ -426,13 +480,21 @@ export async function exportToJSON(): Promise<SyncFileFormat> {
       anchor: r.anchor,
       created: r.created,
       updated: r.updated,
-    });
+    };
+    if (r.deleted) hl.deleted = true;
+
+    page.highlights.push(hl);
   }
 
-  // 每个域名内按 URL 排序
-  for (const d of Object.values(domains)) {
-    d.pages.sort((a, b) => a.url.localeCompare(b.url));
+  // 过滤空页面和空域名
+  for (const [domain, domainData] of Object.entries(domains)) {
+    domainData.pages = domainData.pages.filter((p) => p.highlights.length > 0);
+    if (domainData.pages.length === 0) {
+      delete domains[domain];
+    }
   }
+
+  await txComplete(tx);
 
   return {
     version: 1,
@@ -442,12 +504,13 @@ export async function exportToJSON(): Promise<SyncFileFormat> {
 }
 
 /**
- * 从 JSON 数据导入笔记到 IndexedDB。
+ * 从 JSON 导入笔记到 IndexedDB。
  *
- * 合并策略：newer-wins。同 id 的记录比较 updated 时间戳，
- * IndexedDB 中已有的较新记录不会被覆盖。
- *
- * @returns 导入和跳过的记录数
+ * 合并策略（newer-wins + 软删除感知）：
+ *   - IndexedDB 无此 id → 直接导入
+ *   - IndexedDB 有此 id，本机 deleted=true 且 updated > 文件 → 跳过（本机删除更新）
+ *   - IndexedDB 有此 id，本机 updated >= 文件 → 跳过（本机更新）
+ *   - 文件 updated >= 本机 → 覆盖导入（含 undelete）
  */
 export async function importFromJSON(
   data: SyncFileFormat,
@@ -464,9 +527,17 @@ export async function importFromJSON(
       for (const hl of page.highlights) {
         const existing: NoteRecord | undefined = await promisify(store.get(hl.id));
 
-        if (existing && existing.updated >= hl.updated) {
-          skipped++;
-          continue;
+        if (existing) {
+          // 本机软删除且时间戳更新 → 拒绝导入
+          if (existing.deleted && existing.updated >= hl.updated) {
+            skipped++;
+            continue;
+          }
+          // 本机非删除且时间戳更新 → 保留本机
+          if (!existing.deleted && existing.updated >= hl.updated) {
+            skipped++;
+            continue;
+          }
         }
 
         store.put({
@@ -480,6 +551,7 @@ export async function importFromJSON(
           anchor: hl.anchor,
           created: hl.created,
           updated: hl.updated,
+          deleted: hl.deleted === true ? true : false,
         });
         imported++;
       }

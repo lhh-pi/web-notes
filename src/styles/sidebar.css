@@ -99,6 +99,13 @@
 .wn-btn--primary:hover {
   background: var(--wn-accent-hover);
 }
+.wn-btn--danger {
+  color: var(--wn-danger);
+  border-color: var(--wn-danger);
+}
+.wn-btn--danger:hover {
+  background: #ffebee;
+}
 .wn-btn--icon {
   padding: 4px 8px;
   font-size: 16px;
@@ -515,6 +522,38 @@
   flex-shrink: 0;
 }
 
+/* ── Sync permission banner ──────────────────────────────────────────── */
+
+.wn-sync-banner {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 12px;
+  background: #fff3cd;
+  border-bottom: 1px solid #ffc107;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.wn-sync-banner-text {
+  color: #856404;
+}
+
+.wn-sync-banner-actions {
+  display: flex;
+  gap: 6px;
+}
+
+.wn-sync-banner-actions .wn-btn--primary {
+  background: #ffc107;
+  border-color: #ffc107;
+  color: #333;
+}
+
+.wn-sync-banner-actions .wn-btn--primary:hover {
+  background: #e0a800;
+}
+
 /* ── Sync section ────────────────────────────────────────────────────── */
 
 .wn-sync-section {
@@ -544,6 +583,16 @@
   cursor: pointer;
 }
 
+.wn-sync-file-name {
+  font-size: 10px;
+  color: var(--wn-text-secondary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 100px;
+  flex-shrink: 1;
+}
+
 .wn-sync-status {
   font-size: 10px;
   color: var(--wn-accent);
@@ -555,6 +604,28 @@
 
 .wn-sync-error {
   color: #e74c3c;
+}
+
+/* Persistent error — stays visible, with emphasis styling */
+.wn-sync-error--persistent {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 10px;
+  background: #fff5f5;
+  border: 1px solid #fecaca;
+  border-radius: 4px;
+  color: #b91c1c;
+  font-size: 11px;
+  line-height: 1.5;
+  max-width: none;
+  white-space: normal;
+}
+
+.wn-dark .wn-sync-error--persistent {
+  background: #3b1010;
+  border-color: #7f1d1d;
+  color: #fca5a5;
 }
 
 /* ── Import/Export section ──────────────────────────────────────────── */

@@ -14,6 +14,17 @@
     </div>
   </header>
 
+  <!-- Sync permission banner (hidden by default) -->
+  <div id="sync-banner" class="wn-sync-banner" style="display:none;">
+    <span class="wn-sync-banner-text">
+      ⚠ Auto-sync paused — 自动同步已暂停：文件写入权限不足 / File write permission needed
+    </span>
+    <div class="wn-sync-banner-actions">
+      <button id="sync-banner-grant" class="wn-btn wn-btn--small wn-btn--primary">Grant / 授权</button>
+      <button id="sync-banner-manual" class="wn-btn wn-btn--small">Switch to manual / 切换手动</button>
+    </div>
+  </div>
+
   <div class="wn-tabs">
     <button class="wn-tab wn-tab--active" data-tab="page">This Page</button>
     <button class="wn-tab" data-tab="all">All Notes</button>
@@ -81,9 +92,12 @@
         </select>
       </label>
 
-      <!-- Sync file button -->
+      <!-- Sync file name -->
+      <span id="sync-file-name" class="wn-sync-file-name">No sync file</span>
+
+      <!-- Choose / change sync file -->
       <button id="sync-file-btn" class="wn-btn wn-btn--small" title="Choose sync file location">
-        Choose file...
+        Choose...
       </button>
 
       <!-- Sync now button (visible in manual mode) -->
@@ -101,6 +115,9 @@
       </button>
       <button id="import-json-btn" class="wn-btn wn-btn--small" title="Import notes from JSON file">
         ↑ Import JSON
+      </button>
+      <button id="clear-data-btn" class="wn-btn wn-btn--small wn-btn--danger" title="Delete all notes from IndexedDB">
+        Clear Data
       </button>
     </div>
   </footer>

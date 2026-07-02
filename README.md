@@ -34,7 +34,7 @@
   - **All Notes**：所有页面按域名分组，可展开折叠，支持标题/URL 筛选、新标签页打开、单页/整域名删除
   - **Search**：跨网站全文搜索（300ms 防抖 + Enter 即时搜索），匹配高亮文本、笔记内容、页面标题和 URL
 - **暗色模式**：侧边栏和气泡 UI 支持 dark/light 主题，首次启动跟随系统偏好，手动切换持久化
-- **多设备同步**：通过 File System Access API 将数据同步到单个 JSON 文件，配合 OneDrive / iCloud 等云盘自动跨设备同步。支持自动/手动两种同步模式
+- **多设备同步**：通过 File System Access API 将数据同步到单个 JSON 文件，配合 OneDrive / iCloud 等云盘实现跨设备同步。支持手动/自动两种模式（**推荐手动模式**）
 - **导出/导入**：支持导出全部笔记为 JSON 文件备份，也支持从 JSON 文件导入合并（newer-wins 策略）
 
 ## 系统架构
@@ -188,13 +188,15 @@ npm run build
 
 ## 同步与备份
 
-### 自动同步（推荐）
+> **推荐使用手动同步模式。** 由于 Chrome 的 File System Access API 限制，自动模式无法持久保留文件写入权限，闲置一段时间后会频繁提示重新授权。手动模式下数据同样安全存储在 IndexedDB 中，打开侧边栏点击一次按钮即可完成同步。
 
-侧边栏底部 Sync 选择 **Auto** → 点击 **Choose file** → 在 OneDrive / iCloud 目录中选择或创建 `web-notes.json` → 完成。之后每次标注、修改、删除都会自动写回 JSON 文件，云盘客户端自动同步到其他设备。
+### 手动同步（推荐）
 
-### 手动同步
+Sync 选择 **Manual** → 点击 **Choose file** → 在 OneDrive / iCloud 目录中选择或创建 `web-notes.json` → 需要同步时点击 **↻ Sync now**。每次点击都会双向合并（newer-wins），不会丢数据。
 
-Sync 选择 **Manual** → 同样的方式选择文件 → 需要同步时点击 **↻ Sync now** 按钮。
+### 自动同步
+
+Sync 选择 **Auto** → 同样的方式选择文件。每次标注、修改、删除时自动写入 JSON 文件。**注意：闲置一段时间后写入权限可能丢失，页面顶部会出现提示横幅，需在侧边栏中重新授权或切换为手动模式。**
 
 ### 导出/导入 JSON（手动备份）
 
@@ -341,15 +343,18 @@ npm run test
 1. 确认已在两台设备上都选择了同一个云盘目录下的 `web-notes.json`
 2. 确认云盘客户端（OneDrive 等）正在运行且已同步
 3. 如使用手动同步模式，确认已点击 "Sync now" 按钮
-4. 导入 JSON 后会自动触发一次同步（如开启了自动模式）
 
-### 同步文件权限丢失？
+### 自动同步为什么频繁提示权限丢失？
 
-如果同步 JSON 文件被移动或删除，侧边栏会提示 "Sync file access lost"。重新点击 **Choose file** 选择文件即可恢复。
+这是 Chrome 的 File System Access API 安全限制，暂时无法解决。Chrome 不允许扩展在后台持久保留文件写入权限，闲置一段时间后权限会自动回收。**推荐改用 Manual（手动）模式**，数据存 IndexedDB 中不会丢失，打开侧边栏点击一下即可同步。
+
+### 同步文件被移动或删除？
+
+如果同步 JSON 文件被移动或删除，下次同步会失败。重新点击 **Choose (Change)** 选择文件即可恢复。
 
 ### 如何备份数据？
 
-1. **自动备份**：开启同步后，OneDrive 目录中始终有一份最新的 `web-notes.json`
+1. **同步备份**：开启同步后，OneDrive 目录中始终有一份 `web-notes.json`
 2. **手动备份**：侧边栏点击 **↓ Export JSON** 下载
 
 ## 许可证

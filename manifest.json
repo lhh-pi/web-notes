@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "description": "Highlight and annotate any web page. Notes sync across devices via cloud storage.",
   "permissions": [
+    "alarms",
     "contextMenus",
     "storage",
     "sidePanel",

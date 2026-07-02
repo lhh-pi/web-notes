@@ -92,6 +92,9 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
       removeHighlight(msg.highlightId as string);
       hideBubble();
       break;
+    case 'SYNC_WARNING':
+      showSyncWarningModal();
+      break;
     case 'ERROR':
       console.error('[Web Notes]', msg.message);
       break;
@@ -198,6 +201,59 @@ function sendToBackground(
     if (callback) callback(response);
   });
 }
+
+// ── Sync warning banner ───────────────────────────────────────────────
+
+function showSyncWarningModal(): void {
+  if (document.getElementById('wn-sync-warning')) return;
+
+  hideBubble();
+
+  const bar = document.createElement('div');
+  bar.id = 'wn-sync-warning';
+  bar.innerHTML = `
+    <div id="wn-sync-warning-content">
+      <span id="wn-sync-warning-icon">⚠</span>
+      <span id="wn-sync-warning-text">
+        <strong>Web Notes — Auto-Sync Paused / 自动同步已暂停</strong>
+        File write permission unavailable. Notes saved locally but not synced. / 无文件写入权限，笔记已存本地但未同步。
+      </span>
+    </div>
+    <div id="wn-sync-warning-actions">
+      <button id="wn-sync-warning-grant" class="wn-warning-btn wn-warning-btn--primary">Grant / 授权</button>
+      <button id="wn-sync-warning-manual" class="wn-warning-btn">Switch to Manual / 切换手动</button>
+      <button id="wn-sync-warning-close" class="wn-warning-btn">&times;</button>
+    </div>
+  `;
+
+  document.body.prepend(bar);
+
+  bar.querySelector('#wn-sync-warning-grant')!.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'OPEN_SIDEBAR' });
+  });
+
+  bar.querySelector('#wn-sync-warning-manual')!.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'SWITCH_TO_MANUAL' }, () => {
+      dismissSyncModal();
+    });
+  });
+
+  bar.querySelector('#wn-sync-warning-close')!.addEventListener('click', () => {
+    dismissSyncModal();
+  });
+}
+
+function dismissSyncModal(): void {
+  const bar = document.getElementById('wn-sync-warning');
+  if (bar) bar.remove();
+}
+
+// 监听背景发来的恢复通知（用户在侧边栏授权成功后）
+chrome.runtime.onMessage.addListener((message) => {
+  if ((message as Record<string, unknown>).type === 'SYNC_RESOLVED') {
+    dismissSyncModal();
+  }
+});
 
 // ── Initialize ────────────────────────────────────────────────────────
 

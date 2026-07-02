@@ -1,3 +1,6 @@
+
+
+
 /**
  * Shared type definitions for the Web Notes extension.
  *
@@ -108,7 +111,9 @@ export type ContentMessage =
   | { type: 'SEARCH'; query: string }
   | { type: 'GET_DOMAINS' }
   | { type: 'EXPORT'; domain: string }
-  | { type: 'BROKEN_HIGHLIGHTS'; url: string; brokenIds: string[] };
+  | { type: 'BROKEN_HIGHLIGHTS'; url: string; brokenIds: string[] }
+  | { type: 'OPEN_SIDEBAR' }
+  | { type: 'SWITCH_TO_MANUAL' };
 
 /** Messages sent from Background Worker → Content Script. */
 export type BackgroundMessage =
@@ -117,4 +122,7 @@ export type BackgroundMessage =
   | { type: 'HIGHLIGHT_DELETED'; highlightId: string }
   | { type: 'SEARCH_RESULTS'; data: SearchResponse }
   | { type: 'DOMAINS_LIST'; data: DomainsResponse }
+  | { type: 'SYNC_PERMISSION_LOST'; message: string }
+  | { type: 'SYNC_WARNING' }
+  | { type: 'SYNC_RESOLVED' }
   | { type: 'ERROR'; message: string };

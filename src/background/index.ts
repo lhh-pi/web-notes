@@ -87,16 +87,17 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 
 chrome.runtime.onMessage.addListener(
   (message: ContentMessage, _sender, sendResponse) => {
-    handleMessage(message)
+    handleMessage(message, _sender)
       .then((response) => sendResponse(response))
       .catch((err) => sendResponse({ type: 'ERROR', message: err.message }));
 
-    return true; // Keep channel open for async response
+    return true;
   },
 );
 
 async function handleMessage(
   message: ContentMessage,
+  _sender: chrome.runtime.MessageSender,
 ): Promise<BackgroundMessage | Record<string, unknown>> {
   try {
     switch (message.type) {
@@ -125,8 +126,7 @@ async function handleMessage(
           highlight,
         );
 
-        // 触发自动同步
-        sync.maybeSync().catch(() => {});
+        maybeSyncWithWarning(_sender);
 
         // 广播刷新消息给 Sidebar
         chrome.runtime.sendMessage({ type: 'REFRESH_NOTES' }).catch(() => {});
@@ -141,7 +141,7 @@ async function handleMessage(
           message.color,
         );
 
-        sync.maybeSync().catch(() => {});
+        maybeSyncWithWarning(_sender);
         chrome.runtime.sendMessage({ type: 'REFRESH_NOTES' }).catch(() => {});
         return { type: 'HIGHLIGHT_SAVED', data };
       }
@@ -149,7 +149,7 @@ async function handleMessage(
       case 'DELETE_HIGHLIGHT': {
         await db.deleteHighlight(message.highlightId);
 
-        sync.maybeSync().catch(() => {});
+        maybeSyncWithWarning(_sender);
         chrome.runtime.sendMessage({ type: 'REFRESH_NOTES' }).catch(() => {});
         return { type: 'HIGHLIGHT_DELETED', highlightId: message.highlightId };
       }
@@ -167,9 +167,18 @@ async function handleMessage(
         return { type: 'DOMAINS_LIST', data: { domains } };
       }
 
-      case 'EXPORT':
-        // 已废弃：导出功能由 Sidebar 直接调用 sync.exportToFile()
-        return { type: 'ERROR', message: 'Export is now handled directly by the sidebar.' };
+      case 'OPEN_SIDEBAR':
+        // 内容脚本请求打开侧边栏（用于 auto-sync 权限丢失弹窗的"授权"按钮）
+        if (_sender.tab?.windowId) {
+          chrome.sidePanel.open({ windowId: _sender.tab.windowId }).catch(() => {});
+        }
+        return { type: 'OK' };
+
+      case 'SWITCH_TO_MANUAL':
+        // 内容脚本请求切换到手动模式（用于 auto-sync 权限丢失弹窗的"切换手动"按钮）
+        await sync.setSyncMode('manual');
+        chrome.runtime.sendMessage({ type: 'SYNC_RESOLVED' }).catch(() => {});
+        return { type: 'OK' };
 
       case 'BROKEN_HIGHLIGHTS':
         chrome.runtime.sendMessage({
@@ -200,6 +209,44 @@ chrome.action.onClicked.addListener((tab) => {
   }
 });
 
+// ── Sync helpers ──────────────────────────────────────────────────────
+
+/**
+ * Auto 模式下尝试写入同步文件。写入失败（权限不足）时通知当前页面。
+ * 不在 SW 中预检权限——queryPermission 在 SW 上下文中可能意外改变权限状态。
+ */
+async function maybeSyncWithWarning(sender: chrome.runtime.MessageSender): Promise<void> {
+  const mode = await sync.getSyncMode();
+  if (mode !== 'auto') return;
+
+  try {
+    await sync.syncNow();
+  } catch (err) {
+    if (err instanceof sync.SyncPermissionError) {
+      if (sender.tab?.id) {
+        chrome.tabs.sendMessage(sender.tab.id, { type: 'SYNC_WARNING' }).catch(() => {});
+      }
+    }
+  }
+}
+
 // ── Initialize ────────────────────────────────────────────────────────
+
+// SW 冷启动时只读合并一次外部变更
+sync.checkSyncOnStartup().catch(() => {});
+db.purgeExpired().catch(() => {});
+
+// chrome.alarms 作为 SW 重启后的兜底（Chrome 最小 60s）
+try {
+  chrome.alarms.create('sync-check', { delayInMinutes: 0, periodInMinutes: 1 });
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (alarm.name === 'sync-check') {
+      sync.checkSyncOnStartup().catch(() => {});
+      db.purgeExpired().catch(() => {});
+    }
+  });
+} catch {
+  // alarms API 不可用，静默跳过
+}
 
 console.log('[Web Notes] Background worker started');

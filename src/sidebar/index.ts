@@ -5,11 +5,12 @@
  * 直接调用 db.ts（IndexedDB）和 sync.ts（文件同步），无需 Python 后端。
  */
 
-import type { BackgroundMessage, GetNotesResponse } from '../shared/types';
+import type { BackgroundMessage } from '../shared/types';
 import type { PageSummary } from '../shared/db';
 import * as db from '../shared/db';
 import * as sync from '../shared/sync';
 import { renderNoteList } from './note_list';
+import config from '../../config.json';
 import { renderPageList, filterPages } from './page_list';
 import { initSearchPanel } from './search_panel';
 
@@ -37,8 +38,39 @@ const syncModeSelect = document.getElementById('sync-mode-select') as HTMLSelect
 const syncFileBtn = document.getElementById('sync-file-btn')! as HTMLButtonElement;
 const syncNowBtn = document.getElementById('sync-now-btn')! as HTMLButtonElement;
 const syncStatus = document.getElementById('sync-status')! as HTMLSpanElement;
+const syncFileName = document.getElementById('sync-file-name')! as HTMLSpanElement;
 const exportJsonBtn = document.getElementById('export-json-btn')! as HTMLButtonElement;
 const importJsonBtn = document.getElementById('import-json-btn')! as HTMLButtonElement;
+const clearDataBtn = document.getElementById('clear-data-btn')! as HTMLButtonElement;
+
+// Sync permission banner
+const syncBanner = document.getElementById('sync-banner')!;
+const syncBannerGrant = document.getElementById('sync-banner-grant')! as HTMLButtonElement;
+const syncBannerManual = document.getElementById('sync-banner-manual')! as HTMLButtonElement;
+// ── Sidebar poll timer ─────────────────────────────────────────────────
+
+const SIDEBAR_POLL_SEC = 60;
+
+let sidebarPollTimer: ReturnType<typeof setInterval> | null = null;
+
+function startSidebarPolling(): void {
+  stopSidebarPolling();
+  sidebarPollTimer = setInterval(() => {
+    sync.checkSyncOnStartup().then(() => {
+      loadPageNotes();
+      loadAllPages();
+    });
+    // 同时检查权限状态以更新横幅
+    updateSyncBanner();
+  }, SIDEBAR_POLL_SEC * 1000);
+}
+
+function stopSidebarPolling(): void {
+  if (sidebarPollTimer) {
+    clearInterval(sidebarPollTimer);
+    sidebarPollTimer = null;
+  }
+}
 
 // ── Cached page data ──────────────────────────────────────────────────
 
@@ -105,20 +137,9 @@ async function loadPageNotes(): Promise<void> {
   pageUrlEl.textContent = url;
 
   try {
-    const response = await new Promise<{ data?: GetNotesResponse }>((resolve, reject) => {
-      chrome.runtime.sendMessage(
-        { type: 'GET_NOTES', url },
-        (res) => {
-          if (chrome.runtime.lastError) {
-            reject(new Error(chrome.runtime.lastError.message));
-          } else {
-            resolve((res as { data?: GetNotesResponse }) || {});
-          }
-        },
-      );
-    });
-
-    const highlights = response?.data?.highlights || [];
+    // 直接读 IndexedDB，不走消息中转（更快、更可靠）
+    const data = await db.getNotes(url);
+    const highlights = data?.highlights || [];
     if (highlights.length === 0) {
       notesList.innerHTML = '';
       noNotesEl.style.display = 'block';
@@ -165,29 +186,71 @@ pageFilterInput.addEventListener('input', () => {
 
 /** 初始化同步 UI：恢复保存的模式和文件状态。 */
 async function initSyncUI(): Promise<void> {
-  // 恢复同步模式
   const mode = await sync.getSyncMode();
   syncModeSelect.value = mode;
+
+  const fileName = await sync.getSyncFileName();
+  setSyncFileDisplay(mode, fileName);
+
   updateSyncUI(mode);
 
-  // 恢复同步文件状态
-  const fileName = await sync.getSyncFileName();
-  if (fileName) {
-    syncFileBtn.textContent = fileName;
-    syncFileBtn.title = `Sync file: ${fileName}`;
+  // 如果开启了同步且有文件，合并外部变更（只读）+ auto 模式尝试写入
+  if (mode === 'manual' && fileName) {
+    // 手动模式：只读合并外部变更，不写入
+    try {
+      await sync.checkSyncOnStartup();
+    } catch { /* 合并失败静默跳过 */ }
+  } else if (mode === 'auto' && fileName) {
+    // 自动模式：合并 + 写入
+    const recovered = await trySyncOrRecover();
+    if (!recovered) {
+      setSyncStatus(
+        '⚠ Sync file access lost. Please re-select the sync file.',
+        true,
+        true,
+      );
+    } else {
+      setSyncStatus('Synced ✓');
+    }
   }
 }
 
-/** 根据同步模式更新 UI 可见性。 */
-function updateSyncUI(mode: sync.SyncMode): void {
-  syncNowBtn.style.display = mode === 'manual' ? '' : 'none';
+/** 根据模式设置文件名的显示。Off 模式下隐藏已有文件名。 */
+function setSyncFileDisplay(mode: sync.SyncMode, fileName: string | null): void {
+  if (mode === 'off') {
+    syncFileName.textContent = '';
+    syncFileName.style.display = 'none';
+    syncFileBtn.textContent = 'Choose...';
+    syncFileBtn.title = 'Enable sync (Auto or Manual) to select a file';
+  } else if (fileName) {
+    syncFileName.textContent = fileName;
+    syncFileName.style.display = '';
+    syncFileBtn.textContent = 'Change';
+    syncFileBtn.title = `Change sync file (current: ${fileName})`;
+  } else {
+    syncFileName.textContent = 'No sync file';
+    syncFileName.style.display = '';
+    syncFileBtn.textContent = 'Choose...';
+    syncFileBtn.title = 'Choose sync file location';
+  }
 }
 
-/** 更新同步状态提示。 */
-function setSyncStatus(text: string, isError = false): void {
+/** 根据同步模式更新 UI 可见性和状态。 */
+function updateSyncUI(mode: sync.SyncMode): void {
+  // Sync now 按钮：仅手动模式显示
+  syncNowBtn.style.display = mode === 'manual' ? '' : 'none';
+
+  // 选择/更换文件按钮：Off 模式下禁用
+  syncFileBtn.disabled = mode === 'off';
+}
+
+/** 更新同步状态提示。persistent 为 true 时不自动消失（用于权限丢失等关键错误）。 */
+function setSyncStatus(text: string, isError = false, persistent = false): void {
   syncStatus.textContent = text;
-  syncStatus.className = isError ? 'wn-sync-status wn-sync-error' : 'wn-sync-status';
-  if (text) {
+  syncStatus.className = isError
+    ? 'wn-sync-status wn-sync-error' + (persistent ? ' wn-sync-error--persistent' : '')
+    : 'wn-sync-status';
+  if (text && !persistent) {
     setTimeout(() => {
       if (syncStatus.textContent === text) {
         syncStatus.textContent = '';
@@ -196,39 +259,150 @@ function setSyncStatus(text: string, isError = false): void {
   }
 }
 
+/**
+ * 尝试 syncNow，失败则弹出授权框重试。
+ * 成功后自动刷新页面笔记列表。
+ * 不修改同步模式。仅 Sidebar 上下文中调用。
+ *
+ * @returns 同步是否成功
+ */
+async function trySyncOrRecover(): Promise<boolean> {
+  let success = false;
+  try {
+    await sync.syncNow();
+    success = true;
+  } catch (err) {
+    if (err instanceof sync.SyncPermissionError) {
+      const granted = await sync.recoverPermission();
+      if (granted) {
+        try {
+          await sync.syncNow();
+          success = true;
+        } catch {
+          // 恢复后仍失败（文件被删除等）
+        }
+      }
+    }
+  }
+  if (success) {
+    loadPageNotes();
+    loadAllPages();
+  }
+  return success;
+}
+
+/**
+ * 检测权限状态并更新顶部横幅（仅在 auto 模式下需要）。
+ * 权限可用时隐藏横幅，不可用时显示。
+ */
+async function updateSyncBanner(): Promise<void> {
+  const mode = await sync.getSyncMode();
+  if (mode !== 'auto') {
+    syncBanner.style.display = 'none';
+    return;
+  }
+
+  const fileName = await sync.getSyncFileName();
+  if (!fileName) {
+    syncBanner.style.display = 'none';
+    return;
+  }
+
+  const canWrite = await sync.checkWritePermission();
+  syncBanner.style.display = canWrite ? 'none' : '';
+}
+
+// Banner: 点击授权
+syncBannerGrant.addEventListener('click', async () => {
+  syncBannerGrant.disabled = true;
+  syncBannerGrant.textContent = 'Authorizing… / 授权中…';
+  try {
+    const granted = await sync.recoverPermission();
+    if (granted) {
+      await sync.syncNow();
+      syncBanner.style.display = 'none';
+      setSyncStatus('Permission granted — sync resumed ✓ / 授权成功 — 同步已恢复');
+      // 通知所有标签页关闭遮罩弹窗
+      chrome.runtime.sendMessage({ type: 'SYNC_RESOLVED' }).catch(() => {});
+      chrome.tabs.query({}, (tabs) => {
+        for (const tab of tabs) {
+          if (tab.id) chrome.tabs.sendMessage(tab.id, { type: 'SYNC_RESOLVED' }).catch(() => {});
+        }
+      });
+    } else {
+      setSyncStatus('Permission denied. Please re-select the sync file. / 授权被拒绝，请重新选择同步文件', true, true);
+    }
+  } catch {
+    setSyncStatus('Authorization failed. Please re-select the sync file. / 授权失败，请重新选择同步文件', true, true);
+  } finally {
+    syncBannerGrant.disabled = false;
+    syncBannerGrant.textContent = 'Grant / 授权';
+  }
+});
+
+// Banner: 切换到手动模式
+syncBannerManual.addEventListener('click', async () => {
+  await sync.setSyncMode('manual');
+  syncModeSelect.value = 'manual';
+  setSyncFileDisplay('manual', await sync.getSyncFileName());
+  updateSyncUI('manual');
+  syncBanner.style.display = 'none';
+  setSyncStatus('Switched to manual sync / 已切换为手动同步');
+});
+
 syncModeSelect.addEventListener('change', async () => {
   const mode = syncModeSelect.value as sync.SyncMode;
   await sync.setSyncMode(mode);
+
+  if (mode === 'off') {
+    // 关闭同步 → 隐藏文件名
+    setSyncFileDisplay(mode, null);
+    updateSyncUI(mode);
+    return;
+  }
+
+  // 开启同步模式 → 显示已有文件名（如有），尝试同步
+  const fileName = await sync.getSyncFileName();
+  setSyncFileDisplay(mode, fileName);
   updateSyncUI(mode);
 
-  if (mode === 'auto') {
-    // 切换到自动模式时立即同步一次
-    try {
-      await sync.syncNow();
-      setSyncStatus('Synced ✓');
-    } catch {
-      setSyncStatus('Sync failed — select a file first', true);
-    }
+  const recovered = await trySyncOrRecover();
+  if (!recovered) {
+    setSyncStatus('Sync failed. Please choose a sync file.', true, true);
+  } else {
+    setSyncStatus('Synced ✓');
   }
 });
 
 syncFileBtn.addEventListener('click', async () => {
+  const mode = await sync.getSyncMode();
+  if (mode === 'off') return; // Off 模式下按钮已禁用，双重保险
+
+  // 已有文件时弹确认框
+  const hasFile = syncFileName.textContent !== 'No sync file' && syncFileName.textContent !== '';
+  if (hasFile) {
+    const confirmed = confirm(
+      `Current sync file:\n${syncFileName.textContent}\n\nChange to a different file? Your data will be written to the new file. The old file will no longer receive updates.`,
+    );
+    if (!confirmed) return;
+  }
+
   syncFileBtn.disabled = true;
   syncFileBtn.textContent = '...';
   try {
     const name = await sync.selectSyncFile();
     if (name) {
-      syncFileBtn.textContent = name;
-      syncFileBtn.title = `Sync file: ${name}`;
+      syncFileName.textContent = name;
+      syncFileName.style.display = '';
+      syncFileBtn.textContent = 'Change';
+      syncFileBtn.title = `Change sync file (current: ${name})`;
       setSyncStatus('Sync file configured ✓');
-    } else {
-      syncFileBtn.textContent = 'Choose file...';
     }
   } catch (err) {
     setSyncStatus(err instanceof Error ? err.message : 'Failed to select file', true);
-    syncFileBtn.textContent = 'Choose file...';
   } finally {
     syncFileBtn.disabled = false;
+    updateSyncUI(mode);
   }
 });
 
@@ -236,10 +410,12 @@ syncNowBtn.addEventListener('click', async () => {
   syncNowBtn.disabled = true;
   syncNowBtn.textContent = 'Syncing...';
   try {
-    await sync.syncNow();
-    setSyncStatus('Synced ✓');
-  } catch (err) {
-    setSyncStatus(err instanceof Error ? err.message : 'Sync failed', true);
+    const recovered = await trySyncOrRecover();
+    if (!recovered) {
+      setSyncStatus('Sync failed. Please re-select the sync file.', true, true);
+    } else {
+      setSyncStatus('Synced ✓');
+    }
   } finally {
     syncNowBtn.disabled = false;
     syncNowBtn.textContent = '↻ Sync now';
@@ -257,6 +433,25 @@ exportJsonBtn.addEventListener('click', async () => {
   } finally {
     exportJsonBtn.disabled = false;
     exportJsonBtn.textContent = '↓ Export JSON';
+  }
+});
+
+// Show/hide Clear Data button per config.json debug flag
+if (!config.debug?.showClearButton) {
+  clearDataBtn.style.display = 'none';
+}
+
+clearDataBtn.addEventListener('click', async () => {
+  if (!confirm('Delete ALL notes from IndexedDB? This cannot be undone.')) return;
+  if (!confirm('Are you sure? All highlights, notes, sync config, and theme preference will be erased.')) return;
+
+  try {
+    await db.clearAll();
+    setSyncStatus('All data cleared ✓');
+    loadPageNotes();
+    loadAllPages();
+  } catch (err) {
+    setSyncStatus(err instanceof Error ? err.message : 'Clear failed', true);
   }
 });
 
@@ -301,8 +496,18 @@ chrome.runtime.onMessage.addListener((message: BackgroundMessage | { type: strin
 
 initSearchPanel(searchInput, searchResults, noResultsEl);
 initSyncUI();
+
+// 立即加载 IndexedDB 中的数据（快速启动）
 loadPageNotes();
 loadAllPages();
+
+// 检查同步文件并开始轮询
+sync.checkSyncOnStartup().then(() => {
+  loadPageNotes();
+  loadAllPages();
+});
+updateSyncBanner();
+startSidebarPolling();
 
 chrome.tabs.onActivated.addListener(() => {
   loadPageNotes();
